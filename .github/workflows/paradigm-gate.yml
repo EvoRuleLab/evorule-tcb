@@ -9,6 +9,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:  # Manual trigger (used to re-run after transient runner failures)
 
 env:
   CARGO_TERM_COLOR: always
