@@ -1,0 +1,112 @@
+# EvoRule Paradigm Gate CI
+# Runs all gates on every push and PR. Failing = blocked.
+# Source: docs/gate/GATES.md
+
+name: Paradigm Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------
+  # Job 1: Mechanical + TCB gates (fast, no cargo)
+  # ---------------------------------------------------------------
+  mechanical-gates:
+    name: A+B Mechanical + TCB Gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run paradigm-gate.sh (mechanical + TCB redlines)
+        run: bash ./tools/paradigm-gate.sh
+
+  # ---------------------------------------------------------------
+  # Job 2: Cargo build / test / clippy / doc (slower)
+  # ---------------------------------------------------------------
+  cargo-baseline:
+    name: D Process Gates (cargo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry and target
+        uses: actions/swift-actions/cache@v1
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ./target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # G-18: cargo build --release (0 warnings)
+      # --locked enforces Cargo.lock exact versions, preventing silent dep drift.
+      # Per version-lock reference doc: regex/im/sha2 must stay at exact versions
+      # for determinism (Domain::Matches L1 boundary, im::HashMap SipHash seed).
+      - name: G-18 Release build (0 warnings)
+        run: cargo build --release --all-targets --locked 2>&1 | tee build.log
+        env:
+          RUSTFLAGS: "-D warnings"
+
+      # G-19: cargo doc --no-deps (0 warnings)
+      - name: G-19 Doc build (0 warnings)
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --locked
+
+      # G-20: cargo clippy --all-targets -- -D warnings
+      - name: G-20 Clippy (0 warnings)
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      # G-21: cargo test --all-targets (0 failed)
+      - name: G-21 Tests
+        run: cargo test --all-targets --locked -- --nocapture
+
+      # G-22: cargo test --doc (0 failed)
+      - name: G-22 Doc tests
+        run: cargo test --doc --locked
+
+  # ---------------------------------------------------------------
+  # Job 3: Schema gates (only if JSON rules exist)
+  # ---------------------------------------------------------------
+  schema-gates:
+    name: C Schema Gates (JSON rules)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run paradigm-gate.sh schema subset
+        run: |
+          if ls rules/*.json >/dev/null 2>&1; then
+            bash ./tools/paradigm-gate.sh
+          else
+            echo "No JSON rules to validate. Skipping."
+            exit 0
+          fi
+
+  # ---------------------------------------------------------------
+  # Job 4: Publish dry-run (only on release tag)
+  # ---------------------------------------------------------------
+  publish-dry-run:
+    name: G-23 cargo publish --dry-run
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [mechanical-gates, cargo-baseline]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: G-23 Publish dry-run
+        run: |
+          for crate in crates/*/; do
+            if [ -f "$crate/Cargo.toml" ]; then
+              echo "::group::Dry-run publish: $crate"
+              cargo publish --dry-run --manifest-path "$crate/Cargo.toml" --locked --allow-dirty
+              echo "::endgroup::"
+            fi
+          done

@@ -1,0 +1,36 @@
+# Rust build artifacts
+/target/
+
+# Cargo.lock is tracked for deterministic builds (required by paradigm-gate --locked).
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temp
+*.log
+*.tmp
+*.bak
+*.bak-*
+*.bak.*
+
+# Test artifacts
+/proptest-regressions/
+*.failed
+
+
+# Internal audit docs (assistant working memory, not for release)
+# See D:\.hermes\knowledge\evorule-tcb-audit\ for archives
+docs/audit/
+audit/
+
+# Hermes agent working memory (assistant scratch space, not for release)
+.hermes/

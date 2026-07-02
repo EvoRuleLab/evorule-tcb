@@ -1,0 +1,42 @@
+[package]
+name = "evorule-tcb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description.workspace = true
+
+# Constitutional Redline (ER-602): TCB MUST have NO external crates
+# besides serde-family / im-family (serialization + persistent data structures).
+# All version-locked per the local version-lock reference doc (workspace = Cargo.lock = locked).
+# CI runs with `cargo build --locked` to prevent silent upgrades.
+[dependencies]
+# Currently used by src/control/while_loop.rs and src/lib.rs
+im = { workspace = true, features = [
+    "serde",
+] } # im::hashmap! - persistent DS (ER-602 exception)
+log = { workspace = true } # log::trace!, log::warn! - observability
+sha2 = { workspace = true } # audit_chain hash (audit.rs, deterministic.rs)
+hmac = { workspace = true } # HMAC signature (audit.rs)
+serde = { workspace = true, features = [
+    "derive",
+] } # serialization (value.rs, domain.rs, rule.rs)
+serde_json = { workspace = true } # JSON parsing (value.rs, state.rs)
+ordered-float = { workspace = true, features = [
+    "serde",
+] } # OrderedFloat wrapper (value.rs)
+ryu = { workspace = true } # float formatting (value.rs)
+hex = { workspace = true } # hex encoding (audit.rs)
+regex = { workspace = true } # Domain::Matches (domain.rs)
+
+[dev-dependencies]
+# proptest: property-based testing, used in v4-EN TCB tests.
+# Future when_loop property tests will go here.
+proptest = { workspace = true }
+
+[features]
+default = []

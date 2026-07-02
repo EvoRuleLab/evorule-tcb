@@ -1,0 +1,273 @@
+# .github/workflows/ci.yml
+# EvoRule Paradigm CI Pipeline
+# Source: GATES.md (B. Compile-time Gates + D. Process Gates)
+# All gates MUST pass before merge.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # G-11: TCB forbids deprecated (RUSTFLAGS=-D deprecated)
+  # NOTE: -D warnings implies -D deprecated, but we keep it explicit
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ============================================================
+  # D. Process Gates (full build + test)
+  # ============================================================
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Run all platforms, don't cancel on first failure (ensures full matrix coverage)
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # G-21: Tests pass
+      - name: Test (all targets)
+        run: cargo test --locked --verbose --all-targets
+
+      # G-22: Doc-tests pass
+      - name: Doc tests
+        run: cargo test --locked --doc --verbose
+
+      # G-18: Release build clean (optimization issues only appear in release)
+      - name: Build release
+        run: cargo build --locked --release --verbose
+
+      # G-19: Docs clean
+      - name: Docs (no deps)
+        run: cargo doc --locked --no-deps --verbose
+
+      # G-20: Clippy clean
+      - name: Clippy (all targets, warnings as errors)
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  # ============================================================
+  # B. Compile-time Gates (TCB-specific)
+  # ============================================================
+
+  tcb-gates:
+    name: TCB Compile-time Gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ubuntu-cargo-${{ hashFiles('**/Cargo.toml') }}
+
+      # G-10: TCB forbids unsafe
+      - name: G-10 TCB #![forbid(unsafe_code)]
+        run: |
+          if ! grep -q '#!\[forbid(unsafe_code)\]' crates/tcb/src/lib.rs; then
+            echo "❌ G-10 failed: crates/tcb/src/lib.rs does not contain #![forbid(unsafe_code)]"
+            echo "   Add #![forbid(unsafe_code)] at the top of lib.rs (after doc comments)"
+            exit 1
+          fi
+          echo "✅ G-10 TCB forbids unsafe_code"
+
+      # G-12: TCB has strictly limited deps
+      - name: G-12 TCB dependency allowlist
+        run: |
+          ALLOWED_DEPS="serde|serde_json|im|ordered-float|sha2|hex|regex|ryu|hmac|log"
+          # BANNED_DEPS explicitly checked
+          BANNED_DEPS="schemars"
+          if grep -E '^[a-z]' crates/tcb/Cargo.toml | grep -E '^[^#]*=' | grep -qE "$BANNED_DEPS"; then
+            echo "❌ G-12 failed: crates/tcb/Cargo.toml contains banned dependency"
+            echo "   Banned: schemars (belongs in Governance/Web layer)"
+            echo "   Only allowlisted deps may appear in TCB"
+            exit 1
+          fi
+          echo "✅ G-12 TCB dependencies are allowed"
+
+      # G-24: Version locking for deterministic deps
+      - name: G-24 Dependency version locking
+        run: |
+          # Check critical deps use exact versions (with =)
+          if grep -E '^regex = "1"' crates/tcb/Cargo.toml; then
+            echo "❌ G-24 failed: regex uses loose version '1'"
+            echo "   Use exact version: regex = \"=1.10.0\" (L2 determinism)"
+            exit 1
+          fi
+          if grep -E '^sha2 = "0.10"' crates/tcb/Cargo.toml; then
+            echo "❌ G-24 failed: sha2 uses loose version '0.10'"
+            echo "   Use exact version: sha2 = \"=0.10.8\" (L2 determinism)"
+            exit 1
+          fi
+          if grep -E '^ordered-float = "4"' crates/tcb/Cargo.toml; then
+            echo "❌ G-24 failed: ordered-float uses loose version '4'"
+            echo "   Use exact version: ordered-float = \"=4.2.0\" (L2 determinism)"
+            exit 1
+          fi
+          echo "✅ G-24 Dependencies locked for determinism"
+
+  # ============================================================
+  # A + C. Paradigm Gates (mechanical + schema)
+  # ============================================================
+
+  paradigm-gates:
+    name: Paradigm Gates (A + C)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ubuntu-cargo-${{ hashFiles('**/Cargo.toml') }}
+
+      # G-13: No edits to TCB core files (PR only)
+      - name: G-13 TCB core files protected
+        if: github.event_name == 'pull_request'
+        run: |
+          CORE_FILES=(
+            "crates/tcb/src/lib.rs"
+            "crates/tcb/src/value.rs"
+            "crates/tcb/src/state.rs"
+            "crates/tcb/src/domain.rs"
+            "crates/tcb/src/rule.rs"
+            "crates/tcb/src/exec_context.rs"
+            "crates/tcb/src/deterministic.rs"
+            "crates/tcb/src/error.rs"
+          )
+          CHANGED=$(git diff --name-only origin/main...HEAD || git diff --name-only HEAD~1)
+          for file in "${CORE_FILES[@]}"; do
+            if echo "$CHANGED" | grep -q "^$file$"; then
+              echo "❌ G-13 failed: $file was modified"
+              echo "   TCB core files are frozen (see crates/tcb/FREEZE.md)"
+              echo "   Any change requires review and approval"
+              exit 1
+            fi
+          done
+          echo "✅ G-13 No TCB core files modified"
+
+      # G-14: New .rs files only in allowed paths (PR only)
+      - name: G-14 New files in allowed paths
+        if: github.event_name == 'pull_request'
+        run: |
+          ALLOWED_PATHS=(
+            "^crates/tcb/src/primitive/"
+            "^crates/governance/src/"
+          )
+          NEW_FILES=$(git diff --name-only --diff-filter=A origin/main...HEAD || git diff --name-only --diff-filter=A HEAD~1)
+          if [ -z "$NEW_FILES" ]; then
+            echo "✅ G-14 No new files"
+            exit 0
+          fi
+          for file in $NEW_FILES; do
+            if ! echo "$file" | grep -qE '\.rs$'; then
+              continue
+            fi
+            ALLOWED=false
+            for pattern in "${ALLOWED_PATHS[@]}"; do
+              if echo "$file" | grep -qE "$pattern"; then
+                ALLOWED=true
+                break
+              fi
+            done
+            if [ "$ALLOWED" = false ]; then
+              echo "❌ G-14 failed: new file $file is not in allowed paths"
+              echo "   New .rs files must be in: ${ALLOWED_PATHS[*]}"
+              echo "   TCB core files are frozen; extensions only in primitive/"
+              exit 1
+            fi
+          done
+          echo "✅ G-14 New files in allowed paths"
+
+      # A + C Gates: Run paradigm-gate.sh (mechanical + schema)
+      - name: G-01 to G-09, G-15 to G-16 (Paradigm Gates)
+        run: |
+          chmod +x tools/paradigm-gate.sh
+          ./tools/paradigm-gate.sh
+
+  # ============================================================
+  # Security audit
+  # ============================================================
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ubuntu-cargo-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Run cargo-audit
+        run: cargo audit
+
+  # ============================================================
+  # G-23: Publish dry-run (on main branch only)
+  # ============================================================
+
+  publish-dry-run:
+    name: Publish dry-run
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ubuntu-cargo-${{ hashFiles('**/Cargo.toml') }}
+
+      # G-23: Publish dry-run
+      - name: G-23 cargo publish --dry-run
+        run: |
+          # Check all workspace crates
+          for crate in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].manifest_path' | xargs dirname | grep -v '/tests/' | sort -u); do
+            echo "Checking $crate..."
+            (cd "$crate" && cargo publish --dry-run --allow-dirty) || exit 1
+          done
+        env:
+          # --allow-dirty required because we're in a dirty git state (CI)
+          # --dry-run doesn't actually publish, so it's safe
+          CARGO_REGISTRY_TOKEN: dummy

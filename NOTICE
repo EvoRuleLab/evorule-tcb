@@ -1,0 +1,32 @@
+evorule-tcb
+Copyright (c) 2026 DAMU ZHENG <evorulelab@gmail.com>
+
+This product includes software developed by DAMU ZHENG and contributors
+to the evorule-tcb project (https://github.com/evorulelab/evorule-tcb).
+
+Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
+or a commercial license. See the LICENSE file in the root of this
+distribution, and DUAL_LICENSE.md for a plain-language summary of
+the dual-licensing model.
+
+Trademarks
+----------
+The two registered trademarks associated with evorule-tcb include
+the Chinese characters 元则 and the English word EvoRule as textual
+components. These trademarks are owned by DAMU ZHENG (initial
+holder), pending assignment to 长沙元则文化传播有限公司 (Changsha
+Yuanze Culture Communication Co., Ltd.). See TRADEMARK.md for the
+trademark policy, and COPYRIGHT_ASSIGNMENT_POLICY.md for the
+transfer mechanism.
+
+Third-party components
+----------------------
+evorule-tcb depends on third-party Rust crates. Their licenses are
+documented in Cargo.lock and the dependency tree. Notable runtime
+dependencies are permissively licensed (MIT / Apache-2.0) and do not
+affect the AGPL-3.0 / commercial dual-licensing of evorule-tcb itself.
+
+Contributors
+------------
+See the AUTHORS list maintained in the project repository, or refer
+to Git commit history for individual contributions.

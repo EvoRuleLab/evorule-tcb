@@ -1,0 +1,15 @@
+# rustfmt.toml
+# EvoRule TCB - project-level rustfmt configuration.
+# Uses only STABLE options because CI runs on the stable toolchain.
+# See https://rust-lang.github.io/rustfmt/ for option docs.
+# Nightly-only options (imports_granularity, group_imports, format_strings,
+# format_code_in_doc_comments, normalize_comments, wrap_comments,
+# comment_width, condense_wildcard_suffixes) are intentionally omitted
+# to avoid CI warnings.
+
+edition = "2021"
+max_width = 100
+tab_spaces = 4
+newline_style = "Unix"
+use_small_heuristics = "Default"
+reorder_imports = true

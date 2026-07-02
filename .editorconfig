@@ -1,0 +1,30 @@
+# .editorconfig
+# EvoRule TCB - editor-agnostic coding style.
+# Pairs with .gitattributes (which enforces LF at git level).
+# See https://editorconfig.org for details.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[*.{yml,yaml,json,toml}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.sh]
+indent_size = 4
+
+[Makefile]
+indent_style = tab
+
+# Generated files (cargo expand, lockfile, etc.)
+[Cargo.lock]
+indent_size = 2

@@ -1,0 +1,38 @@
+# .gitattributes
+# EvoRule TCB - enforce LF line endings for all text files.
+# See docs/spec/en-US/EvoRule_programing_Spec.txt for source-code style.
+
+# Auto-detect text files, normalize to LF on commit
+*               text=auto eol=lf
+
+# Explicit LF for source/config/docs (redundant with above but defensive)
+*.rs            text eol=lf
+*.toml          text eol=lf
+*.md            text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.json          text eol=lf
+*.sh            text eol=lf
+*.lock          text eol=lf
+*.txt           text eol=lf
+
+# Treat documentation as docs (not source) for GitHub stats
+docs/*          linguist-documentation
+*.md            linguist-detectable=true
+
+# Vendored build outputs
+/target/        linguist-vendored
+
+# Binary files (never modify)
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.woff          binary
+*.woff2         binary
+*.ttf           binary
+*.eot           binary
+
+# Workflow / CI files
+.gitattributes  export-subst
