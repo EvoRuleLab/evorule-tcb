@@ -20,7 +20,7 @@
 //!
 //! - `set_context`: Compatibility alias, dispatches to `state_set` or `state_compute`.
 //! - `state_set`: Pure assignment (`set` operation).
-//! - `state_compute`: Compute + assignment (add/sub/mul/div/append/remove).
+//! - `state_compute`: Compute + assignment (add/sub/mul/div/append/remove/length).
 //!
 //! # Design Principles
 //!
@@ -45,7 +45,7 @@
 //! |--------|--------|-----------|
 //! | `state_set` assignment | ✅ L1 deterministic | Pure assignment |
 //! | `state_compute` arithmetic | ✅ L1 deterministic | Saturating arithmetic |
-//! | `state_compute` list ops | ✅ L1 deterministic | Append/remove |
+//! | `state_compute` list ops | ✅ L1 deterministic | Append/remove/length |
 //! | `set_context` dispatch | ✅ L1 deterministic | Deterministic branch |
 //! | Operation validation | ✅ L1 deterministic | Static allowlist |
 //! | Silent fallthrough (non-String attr) | ✅ L1 deterministic | Returns original state |
@@ -61,7 +61,7 @@
 //! # Cross-Language Note (L4)
 //!
 //! These primitives are Rust-only constructs; there is no cross-language equivalent.
-//! The operation semantics (add/sub/mul/div/append/remove) are defined by the
+//! The operation semantics (add/sub/mul/div/append/remove/length) are defined by the
 //! `ContextOpFn` type and are deterministic.
 
 use crate::control::dispatch::resolve_path;
@@ -76,7 +76,7 @@ const VALID_OPERATIONS: &[&str] = &["set", "add", "sub", "mul", "div", "append",
 
 /// List of valid compute operations (specific to `state_compute`).
 /// Note: "set" is NOT included here — use `state_set` for pure assignment.
-const COMPUTE_OPERATIONS: &[&str] = &["add", "sub", "mul", "div", "append", "remove"];
+const COMPUTE_OPERATIONS: &[&str] = &["add", "sub", "mul", "div", "append", "remove", "length"];
 
 /// Register state primitives.
 pub fn register(reg: &mut InstructionRegistry) {
@@ -130,13 +130,14 @@ pub(crate) fn exec_state_set(
 ///
 /// # Parameters
 /// - `attr`: The attribute name (resolved via `$ref`).
-/// - `operation`: The operation to perform — `add`, `sub`, `mul`, `div`, `append`, `remove`.
-/// - `value`: The operand (resolved via `$ref`).
+/// - `operation`: The operation to perform — `add`, `sub`, `mul`, `div`, `append`, `remove`, `length`.
+/// - `value`: The operand (resolved via `$ref`). For `length`, this is the list to measure.
 ///
 /// # Operations
 /// - `add` / `sub` / `mul` / `div`: Arithmetic operations (saturating).
 /// - `append`: Appends to a list.
 /// - `remove`: Removes from a list (first occurrence).
+/// - `length`: Returns the length of the list in `value` (ignores the current value at `attr`).
 ///
 /// # Silent Fallthrough
 /// - If `attr` resolves to a non-String value, returns the original state unchanged.
@@ -654,6 +655,70 @@ mod tests {
             }
             other => panic!("Expected List, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_state_compute_length() {
+        // length operation: returns the length of the list in `value`, writes to `attr`.
+        // The current value at `attr` (Null here) is ignored.
+        let state = State::empty(); // attr "n" does not exist yet
+        let mut params = HashMap::new();
+        params.insert("attr".to_string(), Value::string("n"));
+        params.insert("operation".to_string(), Value::string("length"));
+        params.insert(
+            "value".to_string(),
+            Value::list(vec![
+                Value::Integer(1),
+                Value::Integer(2),
+                Value::Integer(3),
+            ]),
+        );
+        let instr = GenericInstruction::new("state_compute", params);
+
+        let reg = InstructionRegistry::new().with_default_context_ops();
+        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        assert_eq!(
+            result.get("n"),
+            Some(&Value::Integer(3)),
+            "length of a 3-element list should be 3"
+        );
+    }
+
+    #[test]
+    fn test_state_compute_length_empty_list() {
+        let state = State::empty();
+        let mut params = HashMap::new();
+        params.insert("attr".to_string(), Value::string("n"));
+        params.insert("operation".to_string(), Value::string("length"));
+        params.insert("value".to_string(), Value::empty_list());
+        let instr = GenericInstruction::new("state_compute", params);
+
+        let reg = InstructionRegistry::new().with_default_context_ops();
+        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        assert_eq!(
+            result.get("n"),
+            Some(&Value::Integer(0)),
+            "length of an empty list should be 0"
+        );
+    }
+
+    #[test]
+    fn test_state_compute_length_non_list_yields_zero() {
+        // Non-list `value` should yield 0 (graceful fallback, no panic).
+        let state = State::empty();
+        let mut params = HashMap::new();
+        params.insert("attr".to_string(), Value::string("n"));
+        params.insert("operation".to_string(), Value::string("length"));
+        params.insert("value".to_string(), Value::Integer(42));
+        let instr = GenericInstruction::new("state_compute", params);
+
+        let reg = InstructionRegistry::new().with_default_context_ops();
+        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        assert_eq!(
+            result.get("n"),
+            Some(&Value::Integer(0)),
+            "length of a non-list value should be 0"
+        );
     }
 
     // ── B. Silent fallthrough contract (attr non-String → silently return original state) ──

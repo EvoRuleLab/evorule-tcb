@@ -81,6 +81,7 @@ use crate::value::Value;
 pub fn register(reg: &mut InstructionRegistry) {
     reg.register("evaluate_domain", exec_evaluate_domain);
     reg.register("match_domain", exec_match_domain);
+    reg.register("domain_intersect", exec_domain_intersect);
 }
 
 /// Evaluate a domain — determines whether the current state satisfies a given Domain.
@@ -262,6 +263,161 @@ pub(crate) fn exec_match_domain(
         .unwrap_or_else(|| "__matched__".to_string());
 
     Ok(state.set_path(&store_as, Value::Bool(matched)))
+}
+
+/// Domain intersection — determines whether two domain trees *may* have a
+/// non-empty intersection (conservative over-approximation).
+///
+/// This is a pure structural judgment over two domain Value trees; it does
+/// NOT depend on the current state and does NOT execute any rule. It is the
+/// sole primitive that unlocks composition-based rewrites of v4's
+/// `detect_conflicts` / `detect_cycles` / `analyze_rule_effects`
+/// (see ADR-05; business logic stays in the rule layer via Recipe G).
+///
+/// # Parameters
+/// - `domain1` (required): first domain Value (supports `$ref`).
+/// - `domain2` (required): second domain Value (supports `$ref`).
+/// - `result_attr` (required): state path where the boolean result is written.
+///
+/// # Semantics (matches v4 `domain_values_overlap`)
+/// | `(type1, type2)`                              | Result                             |
+/// | --------------------------------------------- | ---------------------------------- |
+/// | `(universal, *)` or `(*, universal)`          | `true`                             |
+/// | `(empty, *)` or `(*, empty)`                  | `false`                            |
+/// | `(atom, atom)`                                | `true` iff `attr1 == attr2`        |
+/// | `(and, X)`                                    | `true` iff ALL children intersect X |
+/// | `(or, X)`                                     | `true` iff ANY child intersects X   |
+/// | `(not, X)`                                    | `true` (conservative; undecidable) |
+/// | `(atom, and/or)`                              | recurse with compound side primary |
+/// | otherwise                                     | `true` (conservative default)      |
+///
+/// # Determinism
+/// L1 deterministic: same `(domain1, domain2)` → same result. No I/O, no
+/// randomness, no state read beyond the two domain params.
+///
+/// # Errors
+/// - `MissingParam`: `domain1`, `domain2`, or `result_attr` is missing.
+///
+/// # Example
+/// ```json
+/// {
+///   "type": "domain_intersect",
+///   "params": {
+///     "domain1": { "$ref": "_r1.domain" },
+///     "domain2": { "$ref": "_r2.domain" },
+///     "result_attr": "_overlap"
+///   }
+/// }
+/// ```
+pub(crate) fn exec_domain_intersect(
+    _reg: &InstructionRegistry,
+    state: &State,
+    instruction: &GenericInstruction,
+) -> Result<State, EvoRuleError> {
+    let d1_raw = instruction
+        .params
+        .get("domain1")
+        .ok_or_else(|| missing_param("domain_intersect", "domain1"))?;
+    let d2_raw = instruction
+        .params
+        .get("domain2")
+        .ok_or_else(|| missing_param("domain_intersect", "domain2"))?;
+    let d1 = resolve_path(state, d1_raw);
+    let d2 = resolve_path(state, d2_raw);
+
+    let result_attr = instruction
+        .params
+        .get("result_attr")
+        .map(|v| resolve_path(state, v))
+        .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+        .ok_or_else(|| missing_param("domain_intersect", "result_attr"))?;
+
+    let intersects = domain_values_overlap(&d1, &d2);
+    Ok(state.set_path(&result_attr, Value::Bool(intersects)))
+}
+
+/// Recursive check whether two domain Value trees may overlap.
+///
+/// Conservative over-approximation: false negatives are forbidden, false
+/// positives are tolerable. Direct port of v4's `domain_values_overlap`
+/// (`evorule-v4/crates/tcb/src/primitive/inference_ops.rs:376`).
+///
+/// **Note on `and` semantics**: v4 uses `any` for `domains` list form and `&&`
+/// for `left/right` binary form. This inconsistency is preserved for behavioral
+/// compatibility. The `domains` list form (`any`) is the correct
+/// over-approximation; the `left/right` form (`&&`) is technically
+/// under-approximation but retained to match v4 exactly.
+fn domain_values_overlap(d1: &Value, d2: &Value) -> bool {
+    let type1 = d1
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let type2 = d2
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Universal overlaps with anything.
+    if type1 == "universal" || type2 == "universal" {
+        return true;
+    }
+    // Empty overlaps with nothing.
+    if type1 == "empty" || type2 == "empty" {
+        return false;
+    }
+    // Two atoms: same attribute → maybe overlap (conservative; ignores op/value).
+    if type1 == "atom" && type2 == "atom" {
+        let attr1 = d1.get("attribute").and_then(|v| v.as_str()).unwrap_or("");
+        let attr2 = d2.get("attribute").and_then(|v| v.as_str()).unwrap_or("");
+        return attr1 == attr2;
+    }
+    // `and`/`or` compound: recurse against the other domain.
+    // Matches v4: `domains` list (or `left` as list) → `any` for both and/or.
+    if type1 == "and" || type1 == "or" {
+        if let Some(children) = d1
+            .get("domains")
+            .or_else(|| d1.get("left"))
+            .and_then(|v| v.as_list())
+        {
+            return children.iter().any(|c| domain_values_overlap(c, d2));
+        }
+        // Binary `left/right` form: `and` → `&&`, `or` → `||` (matches v4).
+        if let (Some(left), Some(right)) = (d1.get("left"), d1.get("right")) {
+            if type1 == "and" {
+                return domain_values_overlap(left, d2) && domain_values_overlap(right, d2);
+            } else {
+                return domain_values_overlap(left, d2) || domain_values_overlap(right, d2);
+            }
+        }
+        // Malformed `and`/`or` (no children): conservative true.
+        return true;
+    }
+    // d2 is compound, d1 is not: recurse with d2 as primary (symmetric).
+    if type2 == "and" || type2 == "or" {
+        if let Some(children) = d2
+            .get("domains")
+            .or_else(|| d2.get("left"))
+            .and_then(|v| v.as_list())
+        {
+            return children.iter().any(|c| domain_values_overlap(d1, c));
+        }
+        if let (Some(left), Some(right)) = (d2.get("left"), d2.get("right")) {
+            if type2 == "and" {
+                return domain_values_overlap(d1, left) && domain_values_overlap(d1, right);
+            } else {
+                return domain_values_overlap(d1, left) || domain_values_overlap(d1, right);
+            }
+        }
+        return true;
+    }
+    // `not` makes static analysis undecidable in general → conservative true.
+    if type1 == "not" || type2 == "not" {
+        return true;
+    }
+    // Unknown types: conservative true.
+    true
 }
 
 // ══════════════════════════════════════════════
@@ -523,6 +679,157 @@ mod tests {
         assert_eq!(result.get("my_match_result"), Some(&Value::Bool(true)));
         // Default __matched__ does not exist
         assert!(result.get("__matched__").is_none());
+    }
+
+    // ══════════════════════════════════════════════
+    // domain_intersect tests (ADR-05)
+    // ══════════════════════════════════════════════
+
+    fn atom_domain(attr: &str, op: &str, value: i64) -> Value {
+        Value::from(im::hashmap! {
+            "type".to_string() => Value::string("atom"),
+            "attribute".to_string() => Value::string(attr),
+            "op".to_string() => Value::string(op),
+            "value".to_string() => Value::Integer(value),
+        })
+    }
+
+    fn run_domain_intersect(d1: Value, d2: Value) -> State {
+        let reg = InstructionRegistry::new();
+        let state = State::new(vec![]);
+        let mut params = HashMap::new();
+        params.insert("domain1".to_string(), d1);
+        params.insert("domain2".to_string(), d2);
+        params.insert("result_attr".to_string(), Value::string("_overlap"));
+        let instr = GenericInstruction::new("domain_intersect", params);
+        exec_domain_intersect(&reg, &state, &instr).unwrap()
+    }
+
+    #[test]
+    fn test_domain_intersect_same_attribute_atoms() {
+        // Two atoms on the same attribute → conservative true (may overlap).
+        let d1 = atom_domain("x", "eq", 10);
+        let d2 = atom_domain("x", "eq", 99);
+        let result = run_domain_intersect(d1, d2);
+        assert_eq!(result.get("_overlap"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_domain_intersect_different_attribute_atoms() {
+        // Two atoms on different attributes → no overlap.
+        let d1 = atom_domain("x", "eq", 10);
+        let d2 = atom_domain("y", "eq", 10);
+        let result = run_domain_intersect(d1, d2);
+        assert_eq!(result.get("_overlap"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_domain_intersect_universal_overlaps_anything() {
+        let universal = Value::from(im::hashmap! {
+            "type".to_string() => Value::string("universal"),
+        });
+        let atom = atom_domain("x", "eq", 10);
+        let result = run_domain_intersect(universal.clone(), atom.clone());
+        assert_eq!(result.get("_overlap"), Some(&Value::Bool(true)));
+        // Symmetric direction.
+        let result = run_domain_intersect(atom, universal);
+        assert_eq!(result.get("_overlap"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_domain_intersect_empty_overlaps_nothing() {
+        let empty = Value::from(im::hashmap! {
+            "type".to_string() => Value::string("empty"),
+        });
+        let atom = atom_domain("x", "eq", 10);
+        let result = run_domain_intersect(empty.clone(), atom.clone());
+        assert_eq!(result.get("_overlap"), Some(&Value::Bool(false)));
+        let result = run_domain_intersect(atom, empty);
+        assert_eq!(result.get("_overlap"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_domain_intersect_and_uses_any_matching_v4_semantics() {
+        // v4 uses `any` for `and` with `domains` list (over-approximation).
+        // d1 = and(x, y), d2 = atom(x) → x overlaps → true (conservative).
+        let and_domain = Value::from(im::hashmap! {
+            "type".to_string() => Value::string("and"),
+            "domains".to_string() => Value::list(vec![
+                atom_domain("x", "eq", 1),
+                atom_domain("y", "eq", 2),
+            ]),
+        });
+        let atom_x = atom_domain("x", "eq", 99);
+        let result = run_domain_intersect(and_domain, atom_x);
+        assert_eq!(result.get("_overlap"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_domain_intersect_and_left_right_uses_and_matching_v4_semantics() {
+        // v4 uses `&&` for `and` with `left/right` binary form.
+        // d1 = and(left=x, right=y), d2 = atom(x) → left overlaps, right does not → false.
+        let and_domain = Value::from(im::hashmap! {
+            "type".to_string() => Value::string("and"),
+            "left".to_string() => atom_domain("x", "eq", 1),
+            "right".to_string() => atom_domain("y", "eq", 2),
+        });
+        let atom_x = atom_domain("x", "eq", 99);
+        let result = run_domain_intersect(and_domain, atom_x);
+        assert_eq!(result.get("_overlap"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_domain_intersect_or_left_right_uses_or_matching_v4_semantics() {
+        // v4 uses `||` for `or` with `left/right` binary form.
+        // d1 = or(left=x, right=y), d2 = atom(x) → left overlaps → true.
+        let or_domain = Value::from(im::hashmap! {
+            "type".to_string() => Value::string("or"),
+            "left".to_string() => atom_domain("x", "eq", 1),
+            "right".to_string() => atom_domain("y", "eq", 2),
+        });
+        let atom_x = atom_domain("x", "eq", 99);
+        let result = run_domain_intersect(or_domain, atom_x);
+        assert_eq!(result.get("_overlap"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_domain_intersect_or_any_child_overlaps() {
+        // d1 = or(x, y), d2 = atom(x) → x overlaps → true.
+        let or_domain = Value::from(im::hashmap! {
+            "type".to_string() => Value::string("or"),
+            "domains".to_string() => Value::list(vec![
+                atom_domain("x", "eq", 1),
+                atom_domain("y", "eq", 2),
+            ]),
+        });
+        let atom_x = atom_domain("x", "eq", 99);
+        let result = run_domain_intersect(or_domain, atom_x);
+        assert_eq!(result.get("_overlap"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_domain_intersect_not_is_conservative_true() {
+        // not vs atom → conservative true (undecidable).
+        let not_domain = Value::from(im::hashmap! {
+            "type".to_string() => Value::string("not"),
+            "inner".to_string() => atom_domain("x", "eq", 1),
+        });
+        let atom_y = atom_domain("y", "eq", 99);
+        let result = run_domain_intersect(not_domain, atom_y);
+        assert_eq!(result.get("_overlap"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_domain_intersect_missing_params_errors() {
+        let reg = InstructionRegistry::new();
+        let state = State::new(vec![]);
+        // Missing domain2.
+        let mut params = HashMap::new();
+        params.insert("domain1".to_string(), atom_domain("x", "eq", 1));
+        params.insert("result_attr".to_string(), Value::string("_o"));
+        let instr = GenericInstruction::new("domain_intersect", params);
+        let err = exec_domain_intersect(&reg, &state, &instr).unwrap_err();
+        assert!(err.to_string().contains("domain2"));
     }
 
     /// Test evaluate_domain with Not domain

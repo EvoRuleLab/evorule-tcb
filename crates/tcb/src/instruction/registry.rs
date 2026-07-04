@@ -447,6 +447,7 @@ impl InstructionRegistry {
         self.register_context_op("set", |_a, b| b.clone());
         self.register_context_op("append", ops_append);
         self.register_context_op("remove", ops_remove);
+        self.register_context_op("length", ops_length);
         self
     }
 
@@ -582,6 +583,23 @@ fn ops_remove(a: &Value, b: &Value) -> Value {
             Value::List(new_list)
         }
         _ => a.clone(),
+    }
+}
+
+/// Length operation — returns the length of the list in `b` (the `value` operand).
+/// Non-list values yield 0. The current value at `attr` (`a`) is ignored.
+///
+/// This enables JSON rules to compute list lengths without an `evaluate_expression`
+/// primitive, supporting the L2 migration paradigm of composing existing primitives
+/// (P3-2 extension: `state_compute` with `operation: "length"`).
+///
+/// # Examples
+/// - `op_fn(Null, List([1,2,3]))` → `Integer(3)`
+/// - `op_fn(Null, Null)` → `Integer(0)`
+fn ops_length(_a: &Value, b: &Value) -> Value {
+    match b {
+        Value::List(v) => Value::Integer(v.len() as i64),
+        _ => Value::Integer(0),
     }
 }
 
@@ -891,6 +909,7 @@ mod tests {
         assert!(reg.get_context_operation("sub").is_some());
         assert!(reg.get_context_operation("mul").is_some());
         assert!(reg.get_context_operation("set").is_some());
+        assert!(reg.get_context_operation("length").is_some());
     }
 
     #[test]
@@ -1268,15 +1287,15 @@ mod tests {
         let primitive_fns = crate::primitive::all_exec_fns();
         let control_fns = crate::control::all_exec_fns();
 
-        // Physical primitives: 20 entries
+        // Physical primitives: 21 entries (20 + domain_intersect per ADR-05)
         // Compute_ops reduced to 3 (content_hash, format_string, get_index)
         // Inference_ops: 3 (detect_conflicts, detect_cycles, analyze_rule_effects)
         // Removed: iterate_list, io_read, io_write, check_dimension_consistency,
         //          evaluate_expression, and other deprecated primitives
         assert_eq!(
             primitive_fns.len(),
-            20,
-            "primitive all_exec_fns should have 20 entries"
+            21,
+            "primitive all_exec_fns should have 21 entries"
         );
         // Control flow primitives: 2 entries
         assert_eq!(
@@ -1287,11 +1306,11 @@ mod tests {
 
         // Verify consistency with create_full_registry()
         let reg = create_full_registry();
-        // Registry contains 20 physical + 2 control = 22 primitives
+        // Registry contains 21 physical + 2 control = 23 primitives
         assert_eq!(
             reg.len(),
-            22,
-            "full registry should have 22 instructions (20 primitive + 2 control)"
+            23,
+            "full registry should have 23 instructions (21 primitive + 2 control)"
         );
     }
 

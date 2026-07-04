@@ -114,6 +114,7 @@ pub fn all_exec_fns() -> Vec<(&'static str, ExecutorFn)> {
         // domain_ops
         ("evaluate_domain", domain_ops::exec_evaluate_domain),
         ("match_domain", domain_ops::exec_match_domain),
+        ("domain_intersect", domain_ops::exec_domain_intersect),
         // rule_ops
         ("apply_rule", rule_ops::exec_apply_rule),
         ("observe_rules", rule_ops::exec_observe_rules),
@@ -279,6 +280,9 @@ pub fn all_explainers() -> Vec<(&'static str, ExplainerFn)> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
             format!("Match rules against domain '{domain}'")
+        }),
+        ("domain_intersect", |_| {
+            "Check whether two domain trees may overlap (conservative)".to_string()
         }),
         // rule_ops
         ("apply_rule", |instr| {
