@@ -1,15 +1,14 @@
 [workspace]
 resolver = "2"
-members = [
-    "crates/tcb",
-]
+members = ["crates/tcb"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.75"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/EvoRuleLab/evorule-tcb"
+homepage = "https://github.com/EvoRuleLab/evorule-tcb"
 authors = ["EvoRule Project"]
 keywords = ["rule-engine", "deterministic", "audit", "json-rules", "governance"]
 categories = ["data-structures", "parsing", "development-tools"]
@@ -19,17 +18,19 @@ description = "EvoRule Trusted Computing Base - deterministic execution layer fo
 # Use `=` to prevent silent version drift. CI runs with --locked.
 # Critical for determinism: regex, im, sha2.
 [workspace.dependencies]
-sha2          = "=0.10.9"
-hmac          = "=0.12.1"
-serde         = "=1.0.228"
-serde_json    = "=1.0.150"
+sha2 = "=0.10.9"
+hmac = "=0.12.1"
+serde = "=1.0.228"
+serde_json = "=1.0.150"
 ordered-float = "=4.6.0"
-im            = "=15.1.0"
-ryu           = "=1.0.23"
-hex           = "=0.4.3"
-regex         = "=1.12.4"
-log           = "=0.4.33"
-proptest      = "=1.11.0"
+im = "=15.1.0"
+ryu = "=1.0.23"
+hex = "=0.4.3"
+regex = "=1.12.4"
+log = "=0.4.33"
+proptest = "=1.5.0"
+getrandom = "=0.2.15"
+criterion = "=0.4.0"
 
 [profile.release]
 opt-level = 3

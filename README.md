@@ -12,6 +12,12 @@ EvoRule is a **rule-driven execution platform** where business logic lives entir
 
 ---
 
+## Architecture (v1.1, 2026-07-05)
+
+EvoRule adopts the **Constitutional Dispatch Architecture**: the dispatch table is **dynamically built at startup** by governance-core's `DispatchTableBuilder` from the `InstructionRegistry`, eliminating JSON/Rust duplication while preserving L1 determinism. The constitutional `core_eval.json` shrinks from ~660 → ~30 lines; every physical primitive registration in Rust auto-projects to a cases entry — no JSON edit required. Each `trace_step` audit record carries a `[tbl:<8-char-hash>]` dispatch-table version, enabling audit-chain traceability across dispatch-table evolution. See [CHANGELOG](CHANGELOG.md) and [`docs/spec/en-US/TCB_Governance_Contract.md` §1 + §9](docs/spec/en-US/TCB_Governance_Contract.md) for the full governance contract.
+
+---
+
 ## Why EvoRule?
 
 Traditional rule engines embed execution logic in code, with JSON as mere configuration. EvoRule inverts this:
@@ -57,7 +63,7 @@ EvoRule is split into two cleanly separated layers:
 │  - Python bindings (evorule-py)                          │
 ├─────────────────────────────────────────────────────────────┤
 │                    TCB Layer (Trusted Computing Base)      │
-│  - 22 atomic primitives + 2 control flow tools             │
+│  - 25 atomic primitives + 2 control flow tools             │
 │  - State/Value/Domain data models                         │
 │  - InstructionRegistry (dispatch center)                  │
 │  - while_loop self-driving execution engine               │
@@ -76,69 +82,162 @@ EvoRule is split into two cleanly separated layers:
 ```
 evorule-tcb/                       # This repo (TCB only)
 ├── crates/
-│   ├── tcb/                           # Trusted Computing Base
-│   │   ├── src/
-│   │   │   ├── lib.rs                 # TCB entry point
-│   │   │   ├── value.rs               # Unified Value type (deterministic)
-│   │   │   ├── state.rs               # Immutable State container
-│   │   │   ├── domain.rs              # Domain matching (conditional logic)
-│   │   │   ├── rule.rs                # Rule + GenericInstruction
-│   │   │   ├── exec_context.rs        # __exec__ typed accessor
-│   │   │   ├── deterministic.rs       # content_hash, LogicalClock, RNG
-│   │   │   ├── audit.rs               # HMAC-chained audit records
-│   │   │   ├── error.rs               # TCB error types (pure computation)
-│   │   │   ├── control/               # Control flow primitives
-│   │   │   │   ├── dispatch.rs        # O(1) instruction dispatch
-│   │   │   │   └── while_loop.rs      # Self-driving execution loop
-│   │   │   └── primitive/             # 22 atomic primitives + 2 control flow
-│   │   │       ├── state_ops.rs       # state_set, state_compute
-│   │   │       ├── queue_ops.rs       # advance_instruction, push_instruction
-│   │   │       ├── domain_ops.rs      # evaluate_domain, match_domain
-│   │   │       ├── rule_ops.rs        # apply_rule, filter_rules, inject_rule
-│   │   │       ├── compute_ops.rs     # content_hash, format_string, get_index
-│   │   │       ├── audit_ops.rs       # trace_step
-│   │   │       ├── error_ops.rs       # execute_try_catch, execute_parallel
-│   │   │       └── noop_ops.rs        # noop
-│   │   └── Cargo.toml                 # Strictly limited dependencies
-│   │
-│   └── governance/                    # Governance Layer (Rust) — in EvoRuleLab/evorule-governance
+│   └── tcb/                           # Trusted Computing Base
 │       ├── src/
-│       │   ├── engine/                # TheEquation, core_eval.json
-│       │   ├── rule_loader.rs         # JSON rule loading
-│       │   ├── universe.rs            # Universe (rule management)
-│       │   └── session_manager.rs     # Session lifecycle
-│       └── rules/                     # All JSON rules
-│           ├── core_eval.json         # Entry point — while_loop + dispatch
-│           ├── eval_config.json       # primitives, termination, meta_types
-│           ├── inference/             # Forward/backward chaining
-│           ├── constitution/          # Constitutional rules (immutable)
-│           └── ...
+│       │   ├── lib.rs                 # TCB entry point
+│       │   ├── value.rs               # Unified Value type (deterministic)
+│       │   ├── state.rs               # Immutable State container
+│       │   ├── domain.rs              # Domain matching (conditional logic)
+│       │   ├── rule.rs                # Rule + GenericInstruction
+│       │   ├── exec_context.rs        # __exec__ typed accessor
+│       │   ├── exec_ctl_ctx.rs        # Execution control context
+│       │   ├── deterministic.rs       # content_hash, LogicalClock, RNG
+│       │   ├── audit.rs               # HMAC-chained audit records
+│       │   ├── error.rs               # TCB error types (pure computation)
+│       │   ├── control/               # Control flow primitives
+│       │   │   ├── mod.rs
+│       │   │   ├── dispatch.rs        # O(1) instruction dispatch
+│       │   │   └── while_loop.rs      # Self-driving execution loop
+│       │   ├── instruction/           # Instruction registry
+│       │   │   ├── mod.rs
+│       │   │   └── registry.rs        # InstructionRegistry (dispatch center)
+│       │   └── primitive/             # 25 atomic primitives + 2 control flow
+│       │       ├── mod.rs
+│       │       ├── state_ops.rs       # set_context, state_set, state_compute
+│       │       ├── queue_ops.rs       # advance_instruction, push_instruction, push_instruction_sequence, instruction_sequence
+│       │       ├── domain_ops.rs      # evaluate_domain, match_domain, domain_intersect
+│       │       ├── rule_ops.rs        # apply_rule, observe_rules, filter_rules, inject_rule
+│       │       ├── compute_ops.rs     # content_hash, format_string, get_index, object_keys, set_intersection, set_diff, set_union
+│       │       ├── audit_ops.rs       # trace_step
+│       │       ├── error_ops.rs       # execute_try_catch, execute_parallel
+│       │       └── noop_ops.rs        # noop
+│       ├── tests/                     # Integration verification tests
+│       │   ├── v1_pure_function.rs
+│       │   ├── v4_determinism.rs
+│       │   ├── v6_iter_order.rs
+│       │   ├── v7_termination.rs
+│       │   ├── v8_recursion_bound.rs
+│       │   └── v9_audit_chain.rs
+│       └── Cargo.toml                 # Strictly limited dependencies
 │
 ├── tools/
-│   ├── paradigm-gate.sh               # Pre-commit hook runner
-│   ├── install-hooks.sh               # Install Git pre-commit hook
-│   └── scan_violations.ps1            # Paradigm violation scanner
+│   ├── paradigm-gate.sh               # Pre-commit hook runner (9 gates)
+│   └── install-hooks.sh               # Install Git pre-commit hook
 │
 ├── docs/
 │   ├── spec/                          # Specification (authoritative)
-│   │   ├── zh-CN/                     # Chinese source (authoritative)
-│   │   │   ├── EvoRule_Programming_Spec.md
-│   │   │   ├── EvoRule_Determinism_Standard.md
-│   │   │   └── TCB_Governance_Contract.md
-│   │   └── en-US/                     # English reference translation
-│   │       ├── EvoRule_Programming_Spec.md
+│   │   └── en-US/
+│   │       ├── EvoRule_programming_Spec.md
 │   │       ├── EvoRule_Determinism_Standard.md
 │   │       └── TCB_Governance_Contract.md
-│   ├── gates/
-│   │   └── GATES.md                   # Admission gates (pre-commit + CI)
-│   └── developer-guide/
-│       └── design-decisions/          # Architecture decision records
-│           ├── while-loop-self-driving.md
-│           └── theequation-core-eval-analysis.md
+│   ├── gate/
+│   │   ├── GATES.md                   # Admission gates (pre-commit + CI)
+│   │   └── FORBIDDEN_OVERVIEW.md      # Unified forbidden rules overview
+│   ├── developer-guide/
+│   │   └── design-decisions/          # Architecture decision records
+│   │       ├── 01-while-loop-self-driving.md
+│   │       └── 02-TheEquation, core_eval.json, and while_loop.md
+│   └── LLM_CONTEXT.md                 # LLM context injection document
 │
 ├── .github/workflows/
-│   └── ci.yml                         # CI pipeline (all paradigm gates)
+│   ├── ci.yml                         # CI pipeline (3-OS matrix)
+│   └── paradigm-gate.yml              # Paradigm gate workflow
 └── README.md                          # This file
+```
+
+### Governance Layer (separate repo: EvoRuleLab/evorule-governance)
+
+```
+evorule-governance/                # Governance layer repo
+├── crates/
+│   ├── governance-core/               # Core governance engine
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   ├── engine/               # TheEquation, dispatch table
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── aliases.rs / aliases.json
+│   │   │   │   ├── core_eval.json    # Entry point — while_loop + dispatch
+│   │   │   │   ├── eval_config.json  # primitives, termination, meta_types
+│   │   │   │   ├── equation.rs       # TheEquation facade
+│   │   │   │   └── dispatch_table.rs # Dispatch table builder
+│   │   │   ├── io/                   # I/O channels (env, memory)
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── env.rs
+│   │   │   │   ├── memory.rs
+│   │   │   │   └── primitives.rs
+│   │   │   ├── rule_loader.rs        # JSON rule loading & validation
+│   │   │   ├── rule_executor.rs      # Rule execution engine
+│   │   │   ├── planning.rs           # Planning module
+│   │   │   ├── universe.rs           # Universe (rule management)
+│   │   │   ├── config_runtime.rs     # Runtime configuration
+│   │   │   └── audit_export.rs       # Audit export utilities
+│   │   ├── tests/                    # Integration tests
+│   │   │   ├── aliases_json_loading.rs
+│   │   │   ├── evaluate_end_to_end.rs
+│   │   │   ├── l0_constitution_exec.rs
+│   │   │   ├── l0_constitution_load.rs
+│   │   │   ├── l1_core_load_and_exec.rs
+│   │   │   ├── l2_domain_load_and_exec.rs
+│   │   │   └── registry_freeze_invariant.rs
+│   │   └── Cargo.toml
+│   │
+│   └── governance-inference/          # Inference module
+│       ├── src/
+│       │   ├── lib.rs
+│       │   ├── cycle.rs              # Cycle detection
+│       │   └── forward.rs            # Forward chaining
+│       ├── tests/
+│       │   └── forward_chain_integration.rs
+│       └── Cargo.toml
+│
+├── rules/                            # All JSON rules
+│   ├── manifest.json                 # Rule manifest (versioned)
+│   ├── L0_constitution/             # Constitutional rules (immutable)
+│   │   ├── builtins.json
+│   │   ├── clauses.json
+│   │   ├── constitution_config.json
+│   │   └── orchestration.json
+│   ├── L1_core/                      # Core evaluation rules
+│   │   └── kernel.json
+│   ├── L2_domain/                    # Domain-specific rules
+│   │   ├── amendment.json
+│   │   ├── inference.json
+│   │   ├── meta_actions.json
+│   │   ├── planning.json
+│   │   └── universe.json
+│   ├── L2_inference/                 # Inference rules
+│   │   └── forward_chain.json
+│   └── loader/                       # Loader utility rules
+│       ├── filter_rules_by_flag.json
+│       └── version_diff.json
+│
+├── tools/
+│   ├── paradigm-gate.sh              # Governance paradigm gates
+│   ├── validate-manifest.py          # Manifest validation
+│   └── validate-primitives.py       # Primitive validation
+│
+└── docs/                             # Governance documentation
+    ├── spec/
+    │   └── en-US/
+    │       ├── Manifest_Specification.md
+    │       ├── Rule_Format_Specification.md
+    │       └── layer_Boundary_Contract.md
+    ├── architecture/
+    │   ├── ai-agent-design.md
+    │   └── rule-system-design.md
+    ├── gate/
+    │   ├── GATES.md
+    │   └── FORBIDDEN_OVERVIEW.md
+    ├── developer-guide/
+    │   ├── rule-author-guide.md
+    │   └── design-decisions/
+    │       ├── 02-io-channel-layering.md
+    │       ├── 03-v2-compat-deferred.md
+    │       ├── 04-v4-rule-composite-migration.md
+    │       └── 05-domain-intersect-primitive.md
+    ├── schema/
+    │   └── manifest-schema.json
+    └── primitive-and-rule-creation-guide.md
 ```
 
 ---
@@ -229,6 +328,18 @@ This checks:
 
 ---
 
+## Examples
+
+A minimal example is included to demonstrate the core TCB API:
+
+- `state_pipeline.rs` — runs a small `state_set` + `state_compute` pipeline and verifies that replaying it produces a byte-identical state JSON and a stable content hash.
+
+```bash
+cargo run --example state_pipeline
+```
+
+See [`crates/tcb/examples/`](crates/tcb/examples/) for the full example source. The example doubles as a smoke test: it is wired into the same test pipeline (`cargo test --all-targets`) and is enforced by clippy.
+
 ## Documentation
 
 | Document                                                                 | Language         | Purpose                                                |
@@ -236,7 +347,7 @@ This checks:
 | [Programming Specification](docs/spec/en-US/EvoRule_Programming_Spec.md) | 🇬🇧 English (ref) | Full programming spec — paradigm, rules, anti-patterns |
 | [Determinism Standard](docs/spec/en-US/EvoRule_Determinism_Standard.md)  | 🇬🇧 English (ref) | L1-L4 deterministic classification                     |
 | [TCB-Governance Contract](docs/spec/en-US/TCB_Governance_Contract.md)    | 🇬🇧 English (ref) | Runtime interface boundary                             |
-| [GATES.md](docs/gates/GATES.md)                                          | 🇬🇧 English       | Admission gates catalog                                |
+| [GATES.md](docs/gate/GATES.md)                                           | 🇬🇧 English       | Admission gates catalog                                |
 
 > 🇨🇳 Chinese source documents are authoritative. English versions are reference translations.
 
@@ -278,8 +389,8 @@ Before contributing:
 
 | Component       | Status      | Notes                                                       |
 | --------------- | ----------- | ----------------------------------------------------------- |
-| TCB             | ✅ Complete | 22 primitives + 2 control flow, all deterministic           |
-| Governance      | 🚧 Porting  | Porting from evorule-v4 (selective integration in progress) |
+| TCB             | ✅ Complete | 25 primitives + 2 control flow, all deterministic           |
+| Governance      | ✅ Complete | Constitution dispatch architecture integrated               |
 | JSON Rules      | ✅ Complete | `core_eval.json`, inference, constitution                   |
 | Paradigm Gates  | ✅ Complete | Pre-commit + CI enforcement                                 |
 | Documentation   | ✅ Complete | Spec + determinism + contract                               |
@@ -289,9 +400,10 @@ Before contributing:
 
 ## Version History
 
-| Version | Date       | Notes                                                                                                       |
-| ------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
-| 0.1.0   | 2026-07-01 | Initial TCB release. Governance layer lives in [EvoRuleLab/evorule-governance](https://github.com/EvoRuleLab/evorule-governance). |
+| Version | Date       | Notes                                                                                                                                                                                                            |
+| ------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0.1.1   | 2026-07-08 | Added `domain_intersect`, `set_intersection`, `set_diff`, `set_union` primitives and `state_compute` length operation. Fixed ER-601 determinism bug. G-09 compliance: all Chinese comments converted to English. |
+| 0.1.0   | 2026-07-01 | Initial TCB release. Governance layer lives in [EvoRuleLab/evorule-governance](https://github.com/EvoRuleLab/evorule-governance).                                                                                |
 
 ---
 

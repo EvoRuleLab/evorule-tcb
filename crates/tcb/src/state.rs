@@ -55,36 +55,64 @@
 //! - `im::HashMap` behavior is consistent across all Rust platforms.
 //! - `String` sorting uses Unicode code point order (consistent within Rust).
 
+use crate::error::{path_depth_exceeded, EvoRuleError};
 use crate::exec_context::ExecContext;
-use crate::value::{value_to_serde_json, ImMap, Value};
+use crate::value::{value_to_serde_json, ImMap, ImMapExt, Value};
 use std::collections::HashMap as StdHashMap;
+
+/// Maximum depth for path resolution.
+///
+/// This constant ensures that recursive path operations (set_path_recursive)
+/// always terminate. The value of 64 is chosen as a reasonable upper bound
+/// for real-world use cases while providing protection against infinite recursion.
+///
+/// **Constitutional Redline (ER-601):** All recursive operations must have
+/// a provable termination guarantee.
+pub const MAX_PATH_DEPTH: usize = 64;
 
 /// Immutable state container.
 ///
 /// All "modification" operations on State return a new State. The original State
 /// remains unchanged. This is the foundation of `EvoRule` determinism — old states
 /// are never accidentally mutated.
+///
+/// # Mechanism Exemption (ME-001)
+///
+/// The `version` field is an automatic internal mechanism for O(1) state change
+/// detection. It increments on every state modification and is used by Governance
+/// layer's `execute_until_stable` to detect convergence. See mechanism-exemption.json
+/// for full justification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     /// Internal data storage. Uses `im::HashMap` for O(1) clone.
     pub(crate) data: ImMap,
+    /// Version counter for O(1) state change detection.
+    /// Incremented on every modification operation.
+    pub(crate) version: u64,
 }
 
 impl State {
     /// Create an empty state.
     pub fn empty() -> Self {
-        Self { data: ImMap::new() }
+        Self {
+            data: ImMap::new(),
+            version: 0,
+        }
     }
 
     /// Create a State from an `im::HashMap`.
     pub const fn from_im_map(map: ImMap) -> Self {
-        Self { data: map }
+        Self {
+            data: map,
+            version: 0,
+        }
     }
 
     /// Create a State from a `StdHashMap`.
     pub fn from_std_map(map: StdHashMap<String, Value>) -> Self {
         Self {
             data: ImMap::from(map),
+            version: 0,
         }
     }
 
@@ -94,13 +122,19 @@ impl State {
         for (k, v) in items {
             map.insert(k.to_string(), v);
         }
-        Self { data: map }
+        Self {
+            data: map,
+            version: 0,
+        }
     }
 
     /// Create a State from a Value (which must be an Object).
     pub fn from_value(val: &Value) -> Self {
         match val {
-            Value::Object(m) => Self { data: m.clone() },
+            Value::Object(m) => Self {
+                data: m.clone(),
+                version: 0,
+            },
             _ => Self::empty(),
         }
     }
@@ -108,6 +142,20 @@ impl State {
     /// Extract a reference to the internal data.
     pub const fn data(&self) -> &ImMap {
         &self.data
+    }
+
+    /// Get the version counter for efficient change detection.
+    ///
+    /// This counter increments on every state modification (`set`, `set_all`,
+    /// `remove`, `set_path`, etc.). It is used by the Governance layer's
+    /// `execute_until_stable` to detect state convergence in O(1) time.
+    ///
+    /// # Mechanism Exemption (ME-001)
+    ///
+    /// This method exposes an internal mechanism for O(1) state change detection.
+    /// It does not encode any business policy and preserves determinism.
+    pub const fn version(&self) -> u64 {
+        self.version
     }
 
     /// Build a snapshot of the **business** state, excluding system metadata fields.
@@ -198,6 +246,7 @@ impl State {
     pub fn set(&self, key: impl Into<String>, value: Value) -> Self {
         Self {
             data: self.data.update(key.into(), value),
+            version: self.version + 1,
         }
     }
 
@@ -207,13 +256,17 @@ impl State {
         for (k, v) in items {
             new_data.insert(k.to_string(), v);
         }
-        Self { data: new_data }
+        Self {
+            data: new_data,
+            version: self.version + 1,
+        }
     }
 
     /// Remove a field, returning a new State.
     pub fn remove(&self, key: &str) -> Self {
         Self {
             data: self.data.without(key),
+            version: self.version + 1,
         }
     }
 
@@ -272,23 +325,28 @@ impl State {
     ///
     /// Supports multi-level path setting, e.g., `"a.b.c"`, `"items[0].name"`.
     /// If intermediate path segments do not exist, they are automatically created.
-    pub fn set_path(&self, path: &str, value: Value) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `PathDepthExceeded` if the path depth exceeds `MAX_PATH_DEPTH`.
+    pub fn set_path(&self, path: &str, value: Value) -> Result<Self, EvoRuleError> {
         if path.is_empty() {
-            // Empty path: directly set the empty string key
-            return self.set("", value);
+            return Ok(self.set("", value));
         }
 
         let parts = split_path(path);
         if parts.is_empty() {
-            return self.clone();
+            return Ok(self.clone());
         }
 
         if parts.len() == 1 {
-            // Single-level path, directly set
-            return self.set(parts[0].clone(), value);
+            return Ok(self.set(parts[0].clone(), value));
         }
 
-        // Multi-level path: build from the target position upward
+        if parts.len() > MAX_PATH_DEPTH {
+            return Err(path_depth_exceeded(parts.len(), MAX_PATH_DEPTH));
+        }
+
         self.set_path_recursive(&parts, 0, value)
     }
 
@@ -296,124 +354,121 @@ impl State {
     ///
     /// Recursively sets values from the current level downward.
     /// `parts` is the complete path; `idx` is the current position being processed.
-    fn set_path_recursive(&self, parts: &[String], idx: usize, value: Value) -> Self {
+    ///
+    /// # Termination Guarantee
+    ///
+    /// This function always terminates because:
+    /// 1. `idx` strictly increases with each recursive call
+    /// 2. `idx` is bounded by `parts.len()` (checked before recursion)
+    /// 3. `parts.len()` is bounded by `MAX_PATH_DEPTH` (checked in `set_path`)
+    fn set_path_recursive(
+        &self,
+        parts: &[String],
+        idx: usize,
+        value: Value,
+    ) -> Result<Self, EvoRuleError> {
         if idx >= parts.len() {
-            return self.clone();
+            return Ok(self.clone());
         }
 
         let current_key = &parts[idx];
         let is_last = idx == parts.len() - 1;
 
-        // If the current key is a pure number, treat it as an array index
         if let Ok(index) = current_key.parse::<usize>() {
-            // If the current state is empty, create an array
             if self.data.is_empty() && !parts.is_empty() {
                 let mut new_list = im::Vector::new();
                 while new_list.len() <= index {
                     new_list.push_back(Value::Null);
                 }
                 new_list.set(index, value);
-                // Use current_key for recursive levels, parts[0] for the top level
                 let key = if idx == 0 { &parts[0] } else { current_key };
-                return Self {
+                return Ok(Self {
                     data: im::HashMap::from_iter([(key.clone(), Value::List(new_list))]),
-                };
+                    version: self.version + 1,
+                });
             }
-            return self.set_array_element_by_index(index, value, is_last);
+            return Ok(self.set_array_element_by_index(index, value, is_last));
         }
 
         if is_last {
-            // Last level, directly set the value
-            return self.set(current_key.clone(), value);
+            return Ok(self.set(current_key.clone(), value));
         }
 
-        // Not the last level, recursively update the subpath
         let current_value = self.data.get(current_key);
 
-        // Decide how to recurse based on the current value type
         match current_value {
             Some(Value::Object(m)) => {
-                // Regular object handling
                 let sub_state = Self::from_im_map(m.clone());
-                let updated_sub = sub_state.set_path_recursive(parts, idx + 1, value);
-                self.set(current_key.clone(), updated_sub.to_value())
+                let updated_sub = sub_state.set_path_recursive(parts, idx + 1, value)?;
+                Ok(self.set(current_key.clone(), updated_sub.to_value()))
             }
             Some(Value::List(list)) => {
-                // List handling: the next key must be an array index
                 let next_key = &parts[idx + 1];
                 if let Ok(arr_idx) = next_key.parse::<usize>() {
-                    // Set the list element
                     let mut new_list = list.clone();
                     let has_more = idx + 2 < parts.len();
 
                     if arr_idx < new_list.len() {
                         if has_more {
-                            // Need to recursively set the subpath
                             let current_elem =
                                 new_list.get(arr_idx).cloned().unwrap_or(Value::Null);
                             let sub_state = match current_elem {
                                 Value::Object(m) => Self::from_im_map(m),
                                 _ => Self::empty(),
                             };
-                            let updated_sub = sub_state.set_path_recursive(parts, idx + 2, value);
+                            let updated_sub =
+                                sub_state.set_path_recursive(parts, idx + 2, value)?;
                             new_list.set(arr_idx, updated_sub.to_value());
                         } else {
-                            // Directly set the value
                             new_list.set(arr_idx, value);
                         }
                     } else {
-                        // Extend the list
                         while new_list.len() <= arr_idx {
                             new_list.push_back(Value::Null);
                         }
                         if has_more {
                             let sub_state = Self::empty();
-                            let updated_sub = sub_state.set_path_recursive(parts, idx + 2, value);
+                            let updated_sub =
+                                sub_state.set_path_recursive(parts, idx + 2, value)?;
                             new_list.set(arr_idx, updated_sub.to_value());
                         } else {
                             new_list.set(arr_idx, value);
                         }
                     }
-                    self.set(current_key.clone(), Value::List(new_list))
+                    Ok(self.set(current_key.clone(), Value::List(new_list)))
                 } else {
-                    // Cannot handle non-numeric index access on a list
-                    self.clone()
+                    Ok(self.clone())
                 }
             }
             _ => {
-                // No existing value or not an object — create a new object or array
                 let next_key = if idx + 1 < parts.len() {
                     Some(&parts[idx + 1])
                 } else {
                     None
                 };
 
-                // Check if the next key is an array index
                 if let Some(next_k) = next_key {
                     if let Ok(arr_idx) = next_k.parse::<usize>() {
-                        // Next key is an array index, create an array
                         let mut new_list = im::Vector::new();
                         while new_list.len() <= arr_idx {
                             new_list.push_back(Value::Null);
                         }
 
                         if idx + 2 >= parts.len() {
-                            // The next level is the last, directly set the value
                             new_list.set(arr_idx, value);
                         } else {
-                            // Continue recursive setting
                             let sub_state = Self::empty();
-                            let updated_sub = sub_state.set_path_recursive(parts, idx + 2, value);
+                            let updated_sub =
+                                sub_state.set_path_recursive(parts, idx + 2, value)?;
                             new_list.set(arr_idx, updated_sub.to_value());
                         }
-                        return self.set(current_key.clone(), Value::List(new_list));
+                        return Ok(self.set(current_key.clone(), Value::List(new_list)));
                     }
                 }
 
-                // Create an object
                 let sub_state = Self::empty();
-                let updated_sub = sub_state.set_path_recursive(parts, idx + 1, value);
-                self.set(current_key.clone(), updated_sub.to_value())
+                let updated_sub = sub_state.set_path_recursive(parts, idx + 1, value)?;
+                Ok(self.set(current_key.clone(), updated_sub.to_value()))
             }
         }
     }
@@ -492,7 +547,7 @@ impl State {
     /// Convert to `StdHashMap`.
     pub fn to_std_map(&self) -> StdHashMap<String, Value> {
         self.data
-            .iter()
+            .iter_sorted()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
@@ -514,7 +569,7 @@ impl State {
     /// Collection of all user data keys.
     pub fn user_keys(&self) -> Vec<String> {
         self.data
-            .iter()
+            .iter_sorted()
             .filter(|(k, _)| !k.starts_with("__"))
             .map(|(k, _)| k.clone())
             .collect()
@@ -675,7 +730,7 @@ mod tests {
     #[test]
     fn test_set_path_simple() {
         let s = State::empty();
-        let s2 = s.set_path("x", Value::Integer(42));
+        let s2 = s.set_path("x", Value::Integer(42)).unwrap();
         assert_eq!(s2.get("x"), Some(&Value::Integer(42)));
         // original unchanged
         assert_eq!(s.get("x"), None);
@@ -684,7 +739,7 @@ mod tests {
     #[test]
     fn test_set_path_nested() {
         let s = State::empty();
-        let s2 = s.set_path("a.b.c", Value::Integer(123));
+        let s2 = s.set_path("a.b.c", Value::Integer(123)).unwrap();
         assert_eq!(s2.get_path("a.b.c"), Some(Value::Integer(123)));
     }
 
@@ -692,7 +747,7 @@ mod tests {
     fn test_set_path_nested_existing() {
         let inner = State::new(vec![("x", Value::Integer(1))]);
         let s = State::empty().set("a", inner.to_value());
-        let s2 = s.set_path("a.y", Value::Integer(2));
+        let s2 = s.set_path("a.y", Value::Integer(2)).unwrap();
         assert_eq!(s2.get_path("a.x"), Some(Value::Integer(1)));
         assert_eq!(s2.get_path("a.y"), Some(Value::Integer(2)));
     }
@@ -703,7 +758,7 @@ mod tests {
             "items",
             Value::list(vec![Value::Integer(1), Value::Integer(2)]),
         );
-        let s2 = s.set_path("items[0]", Value::Integer(100));
+        let s2 = s.set_path("items[0]", Value::Integer(100)).unwrap();
         assert_eq!(s2.get_path("items[0]"), Some(Value::Integer(100)));
         assert_eq!(s2.get_path("items[1]"), Some(Value::Integer(2)));
     }
@@ -711,7 +766,7 @@ mod tests {
     #[test]
     fn test_set_path_array_out_of_bounds() {
         let s = State::empty().set("items", Value::list(vec![Value::Integer(1)]));
-        let s2 = s.set_path("items[5]", Value::Integer(999));
+        let s2 = s.set_path("items[5]", Value::Integer(999)).unwrap();
         assert_eq!(s2.get_path("items[0]"), Some(Value::Integer(1)));
         assert_eq!(s2.get_path("items[5]"), Some(Value::Integer(999)));
     }
@@ -719,16 +774,51 @@ mod tests {
     #[test]
     fn test_set_path_deep_nested() {
         let s = State::empty();
-        let s2 = s.set_path("a.b.c.d.e", Value::string("deep"));
+        let s2 = s.set_path("a.b.c.d.e", Value::string("deep")).unwrap();
         assert_eq!(s2.get_path("a.b.c.d.e"), Some(Value::string("deep")));
     }
 
     #[test]
     fn test_set_path_creates_intermediate() {
         let s = State::empty();
-        let s2 = s.set_path("a.b", Value::Integer(1));
+        let s2 = s.set_path("a.b", Value::Integer(1)).unwrap();
         assert!(s2.get_path("a").is_some());
         assert!(s2.get_path("a").unwrap().is_object());
+    }
+
+    #[test]
+    fn test_set_path_depth_limit_exceeded() {
+        // Path depth exceeds MAX_PATH_DEPTH → returns error
+        let s = State::empty();
+        let deep_path = (0..(MAX_PATH_DEPTH + 1))
+            .map(|i| format!("level{}", i))
+            .collect::<Vec<_>>()
+            .join(".");
+        let result = s.set_path(&deep_path, Value::Integer(42));
+        assert!(
+            result.is_err(),
+            "path depth {} should exceed limit {}",
+            MAX_PATH_DEPTH + 1,
+            MAX_PATH_DEPTH
+        );
+    }
+
+    #[test]
+    fn test_set_path_depth_limit_equals_max() {
+        // Path depth equals MAX_PATH_DEPTH → succeeds
+        let s = State::empty();
+        let deep_path = (0..MAX_PATH_DEPTH)
+            .map(|i| format!("level{}", i))
+            .collect::<Vec<_>>()
+            .join(".");
+        let result = s.set_path(&deep_path, Value::Integer(42));
+        assert!(
+            result.is_ok(),
+            "path depth {} should be within limit",
+            MAX_PATH_DEPTH
+        );
+        let s2 = result.unwrap();
+        assert_eq!(s2.get_path(&deep_path), Some(Value::Integer(42)));
     }
 
     // ========== set_path_recursive additional tests ==========
@@ -736,7 +826,7 @@ mod tests {
     #[test]
     fn test_set_path_recursive_empty_path() {
         let s = State::empty();
-        let s2 = s.set_path("", Value::Integer(42));
+        let s2 = s.set_path("", Value::Integer(42)).unwrap();
         // Empty path returns the value converted to a State
         assert_eq!(s2.get_path(""), Some(Value::Integer(42)));
     }
@@ -744,7 +834,7 @@ mod tests {
     #[test]
     fn test_set_path_recursive_overwrite_existing() {
         let s = State::new(vec![("x", Value::Integer(1))]);
-        let s2 = s.set_path("x", Value::Integer(2));
+        let s2 = s.set_path("x", Value::Integer(2)).unwrap();
         assert_eq!(s2.get("x"), Some(&Value::Integer(2)));
         // Original state unchanged
         assert_eq!(s.get("x"), Some(&Value::Integer(1)));
@@ -755,14 +845,16 @@ mod tests {
         let inner = State::new(vec![("name", Value::string("item1"))]);
         let items = Value::list(vec![inner.to_value()]);
         let s = State::empty().set("items", items);
-        let s2 = s.set_path("items[0].name", Value::string("updated"));
+        let s2 = s
+            .set_path("items[0].name", Value::string("updated"))
+            .unwrap();
         assert_eq!(s2.get_path("items[0].name"), Some(Value::string("updated")));
     }
 
     #[test]
     fn test_set_path_recursive_array_create() {
         let s = State::empty();
-        let s2 = s.set_path("arr[2]", Value::Integer(3));
+        let s2 = s.set_path("arr[2]", Value::Integer(3)).unwrap();
         assert_eq!(s2.get_path("arr[0]"), Some(Value::Null));
         assert_eq!(s2.get_path("arr[1]"), Some(Value::Null));
         assert_eq!(s2.get_path("arr[2]"), Some(Value::Integer(3)));
@@ -771,7 +863,9 @@ mod tests {
     #[test]
     fn test_set_path_recursive_mixed_path() {
         let s = State::empty();
-        let s2 = s.set_path("users[0].name.first", Value::string("John"));
+        let s2 = s
+            .set_path("users[0].name.first", Value::string("John"))
+            .unwrap();
         assert_eq!(
             s2.get_path("users[0].name.first"),
             Some(Value::string("John"))
@@ -781,7 +875,9 @@ mod tests {
     #[test]
     fn test_set_path_recursive_complex_nested() {
         let s = State::empty();
-        let s2 = s.set_path("level1.level2[0].level3.key", Value::Integer(42));
+        let s2 = s
+            .set_path("level1.level2[0].level3.key", Value::Integer(42))
+            .unwrap();
         assert_eq!(
             s2.get_path("level1.level2[0].level3.key"),
             Some(Value::Integer(42))
@@ -853,7 +949,7 @@ mod tests {
     #[test]
     fn test_set_path_empty_key() {
         // Setting the empty string key
-        let s = State::empty().set_path("", Value::Integer(99));
+        let s = State::empty().set_path("", Value::Integer(99)).unwrap();
         assert_eq!(s.get(""), Some(&Value::Integer(99)));
     }
 
@@ -861,7 +957,7 @@ mod tests {
     fn test_set_path_empty_path_unchanged() {
         // Empty path → does not change state (returns a clone)
         let s = State::new(vec![("x", Value::Integer(5))]);
-        let s2 = s.set_path("", Value::Integer(99));
+        let s2 = s.set_path("", Value::Integer(99)).unwrap();
         // set_path on empty path sets the "" key
         assert_eq!(s2.get(""), Some(&Value::Integer(99)));
     }
@@ -870,7 +966,7 @@ mod tests {
     fn test_set_path_nested_into_scalar_fails() {
         // Attempting to set a nested path under a scalar → silently fails (returns clone)
         let s = State::new(vec![("x", Value::Integer(5))]);
-        let s2 = s.set_path("x.nested", Value::Integer(99));
+        let s2 = s.set_path("x.nested", Value::Integer(99)).unwrap();
         // x is an Integer, cannot set nested under it → s2 == s
         assert!(s2.get("x").is_some()); // x remains an Integer
     }
@@ -880,9 +976,105 @@ mod tests {
         // arr[5] is the last level but out of bounds (array has only 1 element)
         // → extends the array and sets the value
         let s = State::new(vec![("arr", Value::list(vec![Value::Integer(1)]))]);
-        let s2 = s.set_path("arr[5]", Value::Integer(99));
+        let s2 = s.set_path("arr[5]", Value::Integer(99)).unwrap();
         // arr[5] out of bounds, is_last=true, extends array and sets value
         assert_eq!(s2.get_path("arr[5]"), Some(Value::Integer(99)));
+    }
+
+    #[test]
+    fn test_set_path_scalar_to_list() {
+        // When current_value is a scalar (not Object/List), and next key is numeric index,
+        // should create a List with null padding
+        let s = State::new(vec![("items", Value::string("not a list"))]);
+        let s2 = s.set_path("items[2].name", Value::string("test")).unwrap();
+        assert!(s2.get("items").unwrap().is_list());
+        assert_eq!(s2.get_path("items[0]"), Some(Value::Null));
+        assert_eq!(s2.get_path("items[1]"), Some(Value::Null));
+        assert_eq!(s2.get_path("items[2].name"), Some(Value::string("test")));
+    }
+
+    #[test]
+    fn test_set_path_list_with_non_numeric_next_key() {
+        // When current_value is a List but next key is not a numeric index,
+        // should silently fail (return clone)
+        let s = State::new(vec![("items", Value::list(vec![Value::Integer(1)]))]);
+        let s2 = s.set_path("items.non_numeric", Value::Integer(99)).unwrap();
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn test_set_array_element_multiple_lists() {
+        // When state has multiple List fields and path starts with numeric index,
+        // set_array_element_by_index should return clone (ambiguous which list to target)
+        let s = State::new(vec![
+            (
+                "list1",
+                Value::list(vec![Value::Integer(1), Value::Integer(2)]),
+            ),
+            (
+                "list2",
+                Value::list(vec![Value::Integer(3), Value::Integer(4)]),
+            ),
+        ]);
+        let s2 = s.set_path("0.name", Value::string("test")).unwrap();
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn test_set_array_element_no_lists() {
+        // When state has no List fields and path starts with numeric index,
+        // set_array_element_by_index should return clone
+        let s = State::new(vec![("data", Value::string("test"))]);
+        let s2 = s.set_path("0.name", Value::string("test")).unwrap();
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn test_get_path_list_with_non_numeric_index() {
+        // When get_path encounters a List but the path segment is not numeric,
+        // should return None
+        let s = State::new(vec![(
+            "items",
+            Value::list(vec![Value::string("a"), Value::string("b")]),
+        )]);
+        assert_eq!(s.get_path("items.non_numeric"), None);
+    }
+
+    #[test]
+    fn test_set_path_deep_array_nesting() {
+        // Test deeply nested array creation: arr[0].items[1].value
+        let s = State::empty();
+        let s2 = s
+            .set_path("arr[0].items[1].value", Value::Integer(42))
+            .unwrap();
+        assert_eq!(
+            s2.get_path("arr[0].items[1].value"),
+            Some(Value::Integer(42))
+        );
+        // Verify intermediate arrays were created with null padding
+        assert_eq!(s2.get_path("arr[0].items[0]"), Some(Value::Null));
+    }
+
+    #[test]
+    fn test_update_exec_field_without_context() {
+        // update_exec_field when __exec__ does not exist should create a new context
+        let s = State::empty();
+        let s2 = s.update_exec_field("audit_on", Value::Bool(false));
+        let exec = s2.get("__exec__").unwrap();
+        assert!(exec.is_object());
+        assert_eq!(exec.get("audit_on"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_update_exec_field_existing_context() {
+        // update_exec_field when __exec__ already exists should update the existing context
+        let mut ctx_map = std::collections::HashMap::new();
+        ctx_map.insert("audit_on".to_string(), Value::Bool(true));
+        let ctx = Value::object(ctx_map);
+        let s = State::empty().set("__exec__", ctx);
+        let s2 = s.update_exec_field("audit_on", Value::Bool(false));
+        let exec = s2.get("__exec__").unwrap();
+        assert_eq!(exec.get("audit_on"), Some(&Value::Bool(false)));
     }
 
     #[test]
@@ -1013,8 +1205,8 @@ mod tests {
     fn test_set_path_updates_existing_path() {
         // Setting the same path multiple times
         let s = State::new(vec![("x", Value::Integer(5))]);
-        let s2 = s.set_path("x", Value::Integer(10));
-        let s3 = s2.set_path("x", Value::Integer(15));
+        let s2 = s.set_path("x", Value::Integer(10)).unwrap();
+        let s3 = s2.set_path("x", Value::Integer(15)).unwrap();
         assert_eq!(s3.get("x"), Some(&Value::Integer(15)));
     }
 
@@ -1076,7 +1268,7 @@ mod tests {
         // After fix: uses parts[0] as the key, correctly creates {"a": [...]}
 
         let s = State::empty();
-        let s2 = s.set_path("a[0]", Value::Integer(42));
+        let s2 = s.set_path("a[0]", Value::Integer(42)).unwrap();
 
         // Verify the key name is correct (should be "a", not "")
         assert!(s2.contains_key("a"), "Key should be 'a', not empty string");
@@ -1095,7 +1287,9 @@ mod tests {
 
         // Test multiple different top-level keys
         for key in ["data", "items", "matrix", "x"] {
-            let s2 = s.set_path(&format!("{}[0]", key), Value::Integer(1));
+            let s2 = s
+                .set_path(&format!("{}[0]", key), Value::Integer(1))
+                .unwrap();
             assert!(
                 s2.contains_key(key),
                 "Key should be '{}', not empty string",
@@ -1103,6 +1297,204 @@ mod tests {
             );
             assert!(!s2.contains_key(""), "Should not have an empty key name ''");
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Multi-level nested path resolution tests for State::get_path
+    //
+    // These tests verify that get_path correctly traverses deeply nested
+    // structures combining objects and arrays, mirroring real rule-engine
+    // access patterns like `__inference__.rule_set[0].reads[1]`.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Helper: build a rule-engine-like nested state for tests.
+    ///
+    /// Structure:
+    /// ```text
+    /// __inference__:
+    ///   rule_set:
+    ///     - { rule_id: "A", reads: ["z"], writes: ["x"], meta: { weight: 10 } }
+    ///     - { rule_id: "B", reads: ["x"], writes: ["y"], meta: { weight: 20 } }
+    ///   config:
+    ///     network:
+    ///       endpoints:
+    ///         - { host: "node-1", port: 8080 }
+    ///         - { host: "node-2", port: 9090 }
+    /// ```
+    fn build_nested_state() -> State {
+        let rule_a = Value::from(im::hashmap! {
+            "rule_id".into() => Value::string("A"),
+            "reads".into() => Value::list(vec![Value::string("z")]),
+            "writes".into() => Value::list(vec![Value::string("x")]),
+            "meta".into() => Value::from(im::hashmap! {
+                "weight".into() => Value::Integer(10),
+            }),
+        });
+        let rule_b = Value::from(im::hashmap! {
+            "rule_id".into() => Value::string("B"),
+            "reads".into() => Value::list(vec![Value::string("x")]),
+            "writes".into() => Value::list(vec![Value::string("y")]),
+            "meta".into() => Value::from(im::hashmap! {
+                "weight".into() => Value::Integer(20),
+            }),
+        });
+
+        let endpoint_1 = Value::from(im::hashmap! {
+            "host".into() => Value::string("node-1"),
+            "port".into() => Value::Integer(8080),
+        });
+        let endpoint_2 = Value::from(im::hashmap! {
+            "host".into() => Value::string("node-2"),
+            "port".into() => Value::Integer(9090),
+        });
+
+        let inference = Value::from(im::hashmap! {
+            "rule_set".into() => Value::list(vec![rule_a, rule_b]),
+            "config".into() => Value::from(im::hashmap! {
+                "network".into() => Value::from(im::hashmap! {
+                    "endpoints".into() => Value::list(vec![endpoint_1, endpoint_2]),
+                }),
+            }),
+        });
+
+        State::empty().set("__inference__", inference)
+    }
+
+    #[test]
+    fn test_get_path_deep_object_chain() {
+        // 4-level object-only path: __inference__.config.network.endpoints
+        let s = build_nested_state();
+        let endpoints = s
+            .get_path("__inference__.config.network.endpoints")
+            .expect("endpoints list must resolve");
+        assert!(endpoints.is_list());
+        if let Value::List(arr) = endpoints {
+            assert_eq!(arr.len(), 2, "expected 2 endpoints");
+        }
+    }
+
+    #[test]
+    fn test_get_path_array_index_into_object_field() {
+        // Mixed path with array index in the middle: rule_set[0].rule_id
+        let s = build_nested_state();
+        assert_eq!(
+            s.get_path("__inference__.rule_set[0].rule_id"),
+            Some(Value::string("A")),
+        );
+        assert_eq!(
+            s.get_path("__inference__.rule_set[1].rule_id"),
+            Some(Value::string("B")),
+        );
+    }
+
+    #[test]
+    fn test_get_path_array_index_at_end() {
+        // Path ending with an array index: endpoints[1]
+        let s = build_nested_state();
+        let second = s
+            .get_path("__inference__.config.network.endpoints[1]")
+            .expect("endpoint[1] must resolve");
+        assert!(second.is_object());
+        if let Value::Object(map) = second {
+            assert_eq!(map.get("host"), Some(&Value::string("node-2")));
+        }
+    }
+
+    #[test]
+    fn test_get_path_index_then_object_then_index() {
+        // Complex mixed path: rule_set[0].reads[0]
+        // Object → List → Object → List → String
+        let s = build_nested_state();
+        assert_eq!(
+            s.get_path("__inference__.rule_set[0].reads[0]"),
+            Some(Value::string("z")),
+        );
+        assert_eq!(
+            s.get_path("__inference__.rule_set[1].writes[0]"),
+            Some(Value::string("y")),
+        );
+    }
+
+    #[test]
+    fn test_get_path_deeply_nested_scalar() {
+        // 5-level path resolving to a scalar: rule_set[1].meta.weight
+        let s = build_nested_state();
+        assert_eq!(
+            s.get_path("__inference__.rule_set[1].meta.weight"),
+            Some(Value::Integer(20)),
+        );
+    }
+
+    #[test]
+    fn test_get_path_endpoint_port_through_array() {
+        // Real-world-like path: endpoints[0].port
+        let s = build_nested_state();
+        assert_eq!(
+            s.get_path("__inference__.config.network.endpoints[0].port"),
+            Some(Value::Integer(8080)),
+        );
+    }
+
+    #[test]
+    fn test_get_path_missing_intermediate_key_returns_none() {
+        // Intermediate key does not exist → None (no panic)
+        let s = build_nested_state();
+        assert_eq!(s.get_path("__inference__.nonexistent.field"), None);
+    }
+
+    #[test]
+    fn test_get_path_array_out_of_bounds_mid_path_returns_none() {
+        // Index beyond array length in the middle of the path → None
+        let s = build_nested_state();
+        assert_eq!(s.get_path("__inference__.rule_set[99].rule_id"), None);
+    }
+
+    #[test]
+    fn test_get_path_traversing_scalar_returns_none() {
+        // Path tries to descend into a scalar value → None
+        // rule_set[0].rule_id is a String; descending further yields None
+        let s = build_nested_state();
+        assert_eq!(s.get_path("__inference__.rule_set[0].rule_id.leaf"), None,);
+    }
+
+    #[test]
+    fn test_get_path_index_on_object_returns_none() {
+        // Using an index on an Object (not a List) → None
+        let s = build_nested_state();
+        // __inference__ is an Object, not a List → indexing fails
+        assert_eq!(s.get_path("__inference__[0]"), None);
+    }
+
+    #[test]
+    fn test_get_path_non_numeric_index_returns_none() {
+        // Non-numeric bracket content on a List → None
+        let s = build_nested_state();
+        // split_path turns "rule_set[abc]" into ["rule_set", "abc", ...]
+        // "abc".parse::<usize>() fails → None
+        assert_eq!(s.get_path("__inference__.rule_set[abc].rule_id"), None,);
+    }
+
+    #[test]
+    fn test_get_path_roundtrip_with_set_path() {
+        // set_path then get_path on a deeply nested location must roundtrip
+        let s = State::empty()
+            .set_path("__inference__.rule_set[0].meta.weight", Value::Integer(42))
+            .unwrap();
+        assert_eq!(
+            s.get_path("__inference__.rule_set[0].meta.weight"),
+            Some(Value::Integer(42)),
+        );
+    }
+
+    #[test]
+    fn test_get_path_six_level_chain() {
+        // 6-level mixed chain to stress the traversal loop
+        // __inference__.config.network.endpoints[0].host
+        let s = build_nested_state();
+        assert_eq!(
+            s.get_path("__inference__.config.network.endpoints[0].host"),
+            Some(Value::string("node-1")),
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1149,7 +1541,7 @@ mod tests {
     fn prop_set_path_get_path_roundtrip_single_level() {
         proptest!(|(key in arb_simple_key(), v in arb_value())| {
             let s = State::empty();
-            let s2 = s.set_path(&key, v.clone());
+            let s2 = s.set_path(&key, v.clone()).unwrap();
             prop_assert_eq!(s2.get_path(&key), Some(v));
         });
     }
@@ -1158,8 +1550,8 @@ mod tests {
     #[test]
     fn prop_set_path_immutability() {
         proptest!(|(k1 in arb_simple_key(), v1 in arb_value(), k2 in arb_simple_key(), v2 in arb_value())| {
-            let s1 = State::empty().set_path(&k1, v1.clone());
-            let s2 = s1.set_path(&k2, v2.clone());
+            let s1 = State::empty().set_path(&k1, v1.clone()).unwrap();
+            let s2 = s1.set_path(&k2, v2.clone()).unwrap();
             // Original s1 should be unchanged
             prop_assert_eq!(s1.get_path(&k1), Some(v1));
             // s2 should have the new value
@@ -1172,8 +1564,8 @@ mod tests {
     fn prop_set_path_overwrite() {
         proptest!(|(key in arb_simple_key(), v1 in arb_value(), v2 in arb_value())| {
             let s = State::empty()
-                .set_path(&key, v1.clone())
-                .set_path(&key, v2.clone());
+                .set_path(&key, v1.clone()).unwrap()
+                .set_path(&key, v2.clone()).unwrap();
             prop_assert_eq!(s.get_path(&key), Some(v2));
         });
     }
@@ -1182,7 +1574,7 @@ mod tests {
     #[test]
     fn prop_set_path_empty_key() {
         proptest!(|(v in arb_value())| {
-            let s = State::empty().set_path("", v.clone());
+            let s = State::empty().set_path("", v.clone()).unwrap();
             prop_assert_eq!(s.get_path(""), Some(v));
         });
     }
@@ -1191,8 +1583,339 @@ mod tests {
     #[test]
     fn prop_set_path_two_level_roundtrip() {
         proptest!(|(v in arb_value())| {
-            let s = State::empty().set_path("a.b", v.clone());
+            let s = State::empty().set_path("a.b", v.clone()).unwrap();
             prop_assert_eq!(s.get_path("a.b"), Some(v));
         });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ME-001: State Version Counter Tests
+    //
+    // These tests verify the version counter mechanism (ME-001) for O(1)
+    // state change detection. The version counter increments on every
+    // modification operation and is used by Governance layer's
+    // execute_until_stable.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_version_counter_initialized_to_zero() {
+        let s = State::empty();
+        assert_eq!(s.version(), 0);
+
+        let s2 = State::new(vec![("x", Value::Integer(1))]);
+        assert_eq!(s2.version(), 0);
+
+        let s3 = State::from_im_map(im::HashMap::new());
+        assert_eq!(s3.version(), 0);
+    }
+
+    #[test]
+    fn test_version_counter_increments_on_set() {
+        let s0 = State::empty();
+        assert_eq!(s0.version(), 0);
+
+        let s1 = s0.set("x", Value::Integer(1));
+        assert_eq!(s1.version(), 1);
+
+        let s2 = s1.set("y", Value::Integer(2));
+        assert_eq!(s2.version(), 2);
+
+        let s3 = s2.set("x", Value::Integer(99));
+        assert_eq!(s3.version(), 3);
+    }
+
+    #[test]
+    fn test_version_counter_increments_on_set_all() {
+        let s0 = State::empty();
+        assert_eq!(s0.version(), 0);
+
+        let s1 = s0.set_all(vec![("a", Value::Integer(1)), ("b", Value::Integer(2))]);
+        assert_eq!(s1.version(), 1);
+
+        let s2 = s1.set_all(vec![("c", Value::Integer(3))]);
+        assert_eq!(s2.version(), 2);
+    }
+
+    #[test]
+    fn test_version_counter_increments_on_remove() {
+        let s0 = State::new(vec![("x", Value::Integer(1)), ("y", Value::Integer(2))]);
+        assert_eq!(s0.version(), 0);
+
+        let s1 = s0.remove("x");
+        assert_eq!(s1.version(), 1);
+
+        let s2 = s1.remove("y");
+        assert_eq!(s2.version(), 2);
+    }
+
+    #[test]
+    fn test_version_counter_increments_on_set_path() {
+        let s0 = State::empty();
+        assert_eq!(s0.version(), 0);
+
+        let s1 = s0.set_path("x", Value::Integer(1)).unwrap();
+        assert_eq!(s1.version(), 1);
+
+        let s2 = s1.set_path("a.b.c", Value::Integer(42)).unwrap();
+        assert_eq!(s2.version(), 2);
+
+        let s3 = s2.set_path("items[0]", Value::Integer(10)).unwrap();
+        assert_eq!(s3.version(), 3);
+    }
+
+    #[test]
+    fn test_version_counter_preserves_immutability() {
+        let s0 = State::empty();
+        assert_eq!(s0.version(), 0);
+
+        let s1 = s0.set("x", Value::Integer(1));
+        assert_eq!(s0.version(), 0);
+        assert_eq!(s1.version(), 1);
+    }
+
+    #[test]
+    fn test_version_counter_detects_state_changes() {
+        let s0 = State::empty();
+        let s1 = s0.set("x", Value::Integer(1));
+        let s2 = s1.set("x", Value::Integer(2));
+
+        assert_ne!(s0.version(), s1.version());
+        assert_ne!(s1.version(), s2.version());
+        assert_ne!(s0.version(), s2.version());
+    }
+
+    #[test]
+    fn test_version_counter_clone_preserves_version() {
+        let s1 = State::empty().set("x", Value::Integer(1));
+        assert_eq!(s1.version(), 1);
+
+        let s_cloned = s1.clone();
+        assert_eq!(s_cloned.version(), 1);
+    }
+
+    #[test]
+    fn test_version_counter_state_equality_comparison() {
+        let s1 = State::empty().set("x", Value::Integer(1));
+        let s2 = State::empty().set("x", Value::Integer(1));
+
+        assert_eq!(s1.data(), s2.data());
+        assert_eq!(s1.version(), s2.version());
+
+        let s3 = s1.set("y", Value::Integer(2));
+        assert_eq!(s1.data(), s2.data());
+        assert_ne!(s1.version(), s3.version());
+    }
+
+    #[test]
+    fn test_version_counter_with_complex_nested_set_path() {
+        let s0 = State::empty();
+        assert_eq!(s0.version(), 0);
+
+        let s1 = s0
+            .set_path("data.items[0].name", Value::string("item1"))
+            .unwrap();
+        assert_eq!(s1.version(), 1);
+
+        let s2 = s1
+            .set_path("data.items[1].name", Value::string("item2"))
+            .unwrap();
+        assert_eq!(s2.version(), 2);
+
+        let s3 = s2
+            .set_path("data.metadata.version", Value::Integer(1))
+            .unwrap();
+        assert_eq!(s3.version(), 3);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ME-001: Version Counter Type Conversion Tests
+    //
+    // These tests specifically verify that the version counter's type
+    // conversion logic behaves correctly across different input types
+    // and edge cases, ensuring determinism and correctness.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_version_counter_type_consistency() {
+        let s = State::empty();
+        let version: u64 = s.version();
+        assert_eq!(version, 0u64);
+        assert_eq!(version, 0usize as u64);
+        assert_eq!(version, 0i64 as u64);
+    }
+
+    #[test]
+    fn test_version_counter_increment_type_preservation() {
+        let s0 = State::empty();
+        let v0: u64 = s0.version();
+        assert_eq!(v0, 0);
+
+        let s1 = s0.set("x", Value::Integer(1));
+        let v1: u64 = s1.version();
+        assert_eq!(v1, 1);
+        assert_eq!(v1, v0 + 1);
+
+        let s2 = s1.set("y", Value::Integer(2));
+        let v2: u64 = s2.version();
+        assert_eq!(v2, 2);
+        assert_eq!(v2, v1 + 1);
+    }
+
+    #[test]
+    fn test_version_counter_with_u64_max_boundary() {
+        let mut s = State::empty();
+        let max_updates = 100_000u64;
+
+        for i in 0..max_updates {
+            s = s.set("x", Value::Integer(i as i64));
+            assert_eq!(s.version(), i + 1);
+        }
+
+        assert_eq!(s.version(), max_updates);
+    }
+
+    #[test]
+    fn test_version_counter_type_conversion_comparison() {
+        let s0 = State::empty();
+        let s1 = s0.set("x", Value::Integer(1));
+        let s2 = s1.set("y", Value::Integer(2));
+
+        let v0: u64 = s0.version();
+        let v1: u64 = s1.version();
+        let v2: u64 = s2.version();
+
+        assert!(v0 < v1);
+        assert!(v1 < v2);
+        assert!(v0 < v2);
+
+        assert_eq!(v0, v1 - 1);
+        assert_eq!(v1, v2 - 1);
+        assert_eq!(v0, v2 - 2);
+    }
+
+    #[test]
+    fn test_version_counter_clone_type_consistency() {
+        let s1 = State::empty().set("x", Value::Integer(1));
+        let v1: u64 = s1.version();
+        assert_eq!(v1, 1);
+
+        let s_cloned = s1.clone();
+        let v_cloned: u64 = s_cloned.version();
+        assert_eq!(v_cloned, v1);
+        assert_eq!(v_cloned, 1u64);
+    }
+
+    #[test]
+    fn test_version_counter_set_path_type_conversion() {
+        let s0 = State::empty();
+        assert_eq!(s0.version(), 0u64);
+
+        let s1 = s0.set_path("a", Value::Integer(1)).unwrap();
+        assert_eq!(s1.version(), 1u64);
+
+        let s2 = s1.set_path("a.b", Value::Integer(2)).unwrap();
+        assert_eq!(s2.version(), 2u64);
+
+        let s3 = s2.set_path("a.b[0]", Value::Integer(3)).unwrap();
+        assert_eq!(s3.version(), 3u64);
+
+        let s4 = s3.set_path("a.b[0].c", Value::Integer(4)).unwrap();
+        assert_eq!(s4.version(), 4u64);
+    }
+
+    #[test]
+    fn test_version_counter_set_all_type_conversion() {
+        let s0 = State::empty();
+        assert_eq!(s0.version(), 0u64);
+
+        let s1 = s0.set_all(vec![("a", Value::Integer(1))]);
+        assert_eq!(s1.version(), 1u64);
+
+        let s2 = s1.set_all(vec![("b", Value::Integer(2)), ("c", Value::Integer(3))]);
+        assert_eq!(s2.version(), 2u64);
+
+        let s3 = s2.set_all(vec![]);
+        assert_eq!(s3.version(), 3u64);
+    }
+
+    #[test]
+    fn test_version_counter_remove_type_conversion() {
+        let s0 = State::new(vec![("a", Value::Integer(1)), ("b", Value::Integer(2))]);
+        assert_eq!(s0.version(), 0u64);
+
+        let s1 = s0.remove("a");
+        assert_eq!(s1.version(), 1u64);
+
+        let s2 = s1.remove("b");
+        assert_eq!(s2.version(), 2u64);
+
+        let s3 = s2.remove("nonexistent");
+        assert_eq!(s3.version(), 3u64);
+    }
+
+    #[test]
+    fn test_version_counter_version_field_accessibility() {
+        let s = State::empty().set("x", Value::Integer(1));
+        assert_eq!(s.version(), 1);
+        assert_eq!(s.version(), 1u64);
+        assert_eq!(s.version() as usize, 1usize);
+        assert_eq!(s.version() as i64, 1i64);
+    }
+
+    #[test]
+    fn test_version_counter_state_eq_ignores_version_in_data() {
+        let s1 = State::empty().set("x", Value::Integer(1));
+        let s2 = State::empty().set("x", Value::Integer(1));
+
+        assert_eq!(s1.data(), s2.data());
+        assert_eq!(s1.version(), s2.version());
+
+        let s3 = s1.set("y", Value::Integer(2));
+        assert_eq!(s1.data(), s2.data());
+        assert_ne!(s1.version(), s3.version());
+        assert_ne!(s1, s3);
+    }
+
+    #[test]
+    fn test_version_counter_from_different_sources() {
+        let s1 = State::empty();
+        assert_eq!(s1.version(), 0);
+
+        let s2 = State::new(vec![("a", Value::Integer(1))]);
+        assert_eq!(s2.version(), 0);
+
+        let mut std_map = StdHashMap::new();
+        std_map.insert("b".to_string(), Value::Integer(2));
+        let s3 = State::from_std_map(std_map);
+        assert_eq!(s3.version(), 0);
+
+        let im_map = im::HashMap::from(vec![("c".to_string(), Value::Integer(3))]);
+        let s4 = State::from_im_map(im_map);
+        assert_eq!(s4.version(), 0);
+
+        let obj_val = Value::from(im::HashMap::from(vec![(
+            "d".to_string(),
+            Value::Integer(4),
+        )]));
+        let s5 = State::from_value(&obj_val);
+        assert_eq!(s5.version(), 0);
+    }
+
+    #[test]
+    fn test_version_counter_with_exec_context_updates() {
+        let s0 = State::empty();
+        assert_eq!(s0.version(), 0u64);
+
+        let exec_map = im::HashMap::from(vec![("audit_on".to_string(), Value::Bool(true))]);
+        let ctx = ExecContext::new(Value::from(exec_map));
+
+        let s1 = s0.set_exec_context(&ctx);
+        assert_eq!(s1.version(), 1u64);
+
+        let s2 = s1.update_exec_field("audit_on", Value::Bool(false));
+        assert_eq!(s2.version(), 2u64);
+
+        let s3 = s2.with_exec_context(&ctx);
+        assert_eq!(s3.version(), 3u64);
     }
 }

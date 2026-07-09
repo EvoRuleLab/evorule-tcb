@@ -17,7 +17,7 @@ This policy covers:
 - The copyright in the evorule-tcb source code, documentation,
   tests, and ancillary files committed to the project repository.
 - The trademarks associated with evorule-tcb, which include
-  the Chinese characters 元则 and the English word EvoRule as
+  the Chinese transliteration Yuanze and the English word EvoRule as
   textual components (see TRADEMARK.md).
 - The role of "Licensor" in any `COMMERCIAL_LICENSE.md` agreement
   signed with commercial licensees.

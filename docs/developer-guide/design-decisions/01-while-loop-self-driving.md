@@ -1,4 +1,4 @@
-# while_loop Self‑Driving Model: Design Principles and Implementation（v1.0-en）
+# while_loop Self‑Driving Model: Design Principles and Implementation(v1.0-en)
 
 ## 1. One‑Sentence Summary
 
@@ -34,7 +34,20 @@ evaluate(instruction, state):
 
 **Core shift**: The engine changes from “controller” to “trigger”. Every step of execution—what to dispatch, what to trace, when to advance, when to stop—is defined by rules in `core_eval.json`.
 
-### 2.3 Design Benefits
+### 2.3 Architecture Update (v1.1, 2026-07-05)
+
+> **v1.1 changes** — The self-driving model described above is preserved (v4-era design, still the foundation). What changed in v1.1 is **how the cases table is built**:
+>
+> - **Before (v1.0)**: Cases table = static JSON in `core_eval.json` (~660 lines). Every physical primitive registration required a paired JSON edit.
+> - **After (v1.1)**: Cases table = **dynamically built at startup** by governance-core's `DispatchTableBuilder` from `InstructionRegistry` (auto-projection) + `register_core_aliases()` (business aliases) + `set_default()` (default case). `core_eval.json` shrinks to ~30 lines skeleton.
+>
+> See [`docs/spec/en-US/TCB_Governance_Contract.md` §1.1](../spec/en-US/TCB_Governance_Contract.md) for the full constitutional dispatch architecture. The §2.2 self-driving model is **unchanged** — dispatch still does `cases[instruction.type]` lookup, but `cases` is now injected via `__exec__` rather than read from JSON at runtime.
+>
+> **TCB-side implications** (new in v1.1):
+> - `control/dispatch.rs` (ER-605 Exception #1) — dual-source reading: `contains_key("cases")` in `instruction.params` distinguishes main dispatch (`__exec__.dispatch_cases`) vs sub-dispatch (`instruction.params.cases`).
+> - `primitive/audit_ops.rs::trace_step` (ER-605 Exception #2) — appends `[tbl:<8-char-hash>]` to `change_summary` for audit-chain dispatch-table versioning.
+
+### 2.4 Design Benefits (v4 self-driving model benefits)
 
 1. **TCB minimization**: The trusted code in the engine shrinks from “the whole for‑loop” to “initialization + one call”. Dispatch/trace/advance/stop logic is moved from TCB to JSON rules.
 2. **Rules as programs**: `core_eval.json` is no longer a configuration file; it is an executable “program”. Changing execution flow requires only JSON modifications, not Rust recompilation.

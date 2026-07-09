@@ -164,6 +164,9 @@ impl AuditRecord {
         nonce: &str,
         key: &[u8],
     ) -> Self {
+        // BUG-03 fix: version field included in HMAC signature to prevent version tampering without breaking hash chain.
+        // Use constant instead of hardcoded literal to ensure new() and compute_hash() use the same version.
+        const CURRENT_VERSION: u32 = 3;
         let hash = Self::compute_hash(
             id,
             nonce,
@@ -175,6 +178,7 @@ impl AuditRecord {
             execution_result,
             change_summary.as_deref(),
             error_message.as_deref(),
+            CURRENT_VERSION,
             key,
         );
 
@@ -190,7 +194,7 @@ impl AuditRecord {
             hash,
             previous_hash: previous_hash.to_string(),
             nonce: nonce.to_string(),
-            version: 3,
+            version: CURRENT_VERSION,
         }
     }
 
@@ -209,7 +213,7 @@ impl AuditRecord {
     /// This function uses `HmacSha256::new_from_slice(key).unwrap()`. HMAC
     /// accepts any key length, so this never panics in practice. The `unwrap`
     /// is intentional and safe due to the HMAC API guarantee.
-    #[allow(clippy::too_many_arguments)] // 11 args needed for HMAC compute_hash inputs
+    #[allow(clippy::too_many_arguments)] // 12 args needed for HMAC compute_hash inputs (including version)
     pub fn compute_hash(
         id: &str,
         nonce: &str,
@@ -221,6 +225,7 @@ impl AuditRecord {
         execution_result: ExecutionResult,
         change_summary: Option<&str>,
         error_message: Option<&str>,
+        version: u32,
         key: &[u8],
     ) -> String {
         // HMAC accepts any key length per RFC 2104; new_from_slice never errors.
@@ -264,6 +269,8 @@ impl AuditRecord {
             }
             None => mac.update(&[0u8]),
         }
+        // BUG-03 fix: version field included in signature to prevent version tampering from misleading verifiers
+        mac.update(&version.to_le_bytes());
 
         hex::encode(mac.finalize().into_bytes())
     }
@@ -281,6 +288,7 @@ impl AuditRecord {
             self.execution_result,
             self.change_summary.as_deref(),
             self.error_message.as_deref(),
+            self.version,
             key,
         );
 
@@ -503,8 +511,6 @@ impl AuditChainState {
 
 /// Compute the SHA256 hash of a State.
 pub fn compute_state_hash(state: &Value) -> String {
-    // content_hash takes &[Value] (owned), so clone is required despite clippy suggestion.
-    #[allow(clippy::cloned_ref_to_slice_refs)]
     content_hash(&[state.clone()])
 }
 
@@ -515,6 +521,7 @@ pub fn compute_state_hash(state: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ExecCtlCtx;
 
     #[test]
     fn test_derive_id_deterministic() {
@@ -727,18 +734,19 @@ mod tests {
         let run_once = || -> AuditChainState {
             let reg = InstructionRegistry::new();
             let mut state = State::new(vec![("x", Value::Integer(1))]);
+            let mut ctx = ExecCtlCtx::new();
 
             let mut params = HashMap::new();
             params.insert("label".to_string(), Value::string("step1"));
             params.insert("rule_id".to_string(), Value::string("rule.test"));
             let instr = GenericInstruction::new("trace_step", params);
-            state = audit_ops::exec_trace_step(&reg, &state, &instr).unwrap();
+            state = audit_ops::exec_trace_step(&reg, &state, &instr, &mut ctx).unwrap();
 
             let mut params2 = HashMap::new();
             params2.insert("label".to_string(), Value::string("step2"));
             params2.insert("rule_id".to_string(), Value::string("rule.test2"));
             let instr2 = GenericInstruction::new("trace_step", params2);
-            state = audit_ops::exec_trace_step(&reg, &state, &instr2).unwrap();
+            state = audit_ops::exec_trace_step(&reg, &state, &instr2, &mut ctx).unwrap();
 
             let chain_val = state.get("__audit_chain").cloned().unwrap();
             AuditChainState::from_value(&chain_val).unwrap()
@@ -777,6 +785,7 @@ mod tests {
         let run_once = || -> Vec<String> {
             let reg = InstructionRegistry::new();
             let mut state = State::new(vec![("x", Value::Integer(0))]);
+            let mut ctx = ExecCtlCtx::new();
 
             let labels = vec!["alpha", "beta", "gamma", "delta"];
             for label in &labels {
@@ -787,7 +796,7 @@ mod tests {
                     Value::string(format!("rule.{}", label)),
                 );
                 let instr = GenericInstruction::new("trace_step", params);
-                state = audit_ops::exec_trace_step(&reg, &state, &instr).unwrap();
+                state = audit_ops::exec_trace_step(&reg, &state, &instr, &mut ctx).unwrap();
             }
 
             let chain_val = state.get("__audit_chain").cloned().unwrap();
@@ -957,8 +966,9 @@ mod tests {
         params.insert("label".to_string(), Value::string("increment"));
         params.insert("rule_id".to_string(), Value::string("rule.increment_x"));
         let instr = GenericInstruction::new("trace_step", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = audit_ops::exec_trace_step(&reg, &state, &instr).unwrap();
+        let result = audit_ops::exec_trace_step(&reg, &state, &instr, &mut ctx).unwrap();
         let chain_val = result.get("__audit_chain").cloned().unwrap();
         let chain = AuditChainState::from_value(&chain_val).unwrap();
 
@@ -984,19 +994,20 @@ mod tests {
 
         let reg = InstructionRegistry::new();
         let mut state = State::new(vec![("x", Value::Integer(0))]);
+        let mut ctx = ExecCtlCtx::new();
 
         // Execute two trace_step records with different rule_ids
         let mut params1 = HashMap::new();
         params1.insert("label".to_string(), Value::string("init"));
         params1.insert("rule_id".to_string(), Value::string("rule.init_x"));
         let instr1 = GenericInstruction::new("trace_step", params1);
-        state = audit_ops::exec_trace_step(&reg, &state, &instr1).unwrap();
+        state = audit_ops::exec_trace_step(&reg, &state, &instr1, &mut ctx).unwrap();
 
         let mut params2 = HashMap::new();
         params2.insert("label".to_string(), Value::string("increment"));
         params2.insert("rule_id".to_string(), Value::string("rule.increment_x"));
         let instr2 = GenericInstruction::new("trace_step", params2);
-        state = audit_ops::exec_trace_step(&reg, &state, &instr2).unwrap();
+        state = audit_ops::exec_trace_step(&reg, &state, &instr2, &mut ctx).unwrap();
 
         let chain_val = state.get("__audit_chain").cloned().unwrap();
         let chain = AuditChainState::from_value(&chain_val).unwrap();
@@ -1020,6 +1031,7 @@ mod tests {
 
         let reg = InstructionRegistry::new();
         let mut state = State::new(vec![("x", Value::Integer(0))]);
+        let mut ctx = ExecCtlCtx::new();
 
         // Simulate a case-hit trace_step
         let mut params1 = HashMap::new();
@@ -1032,7 +1044,7 @@ mod tests {
             Value::string("dispatch.case.increment"),
         );
         let instr1 = GenericInstruction::new("trace_step", params1);
-        state = audit_ops::exec_trace_step(&reg, &state, &instr1).unwrap();
+        state = audit_ops::exec_trace_step(&reg, &state, &instr1, &mut ctx).unwrap();
 
         // Simulate a default fallback trace_step
         let mut params2 = HashMap::new();
@@ -1042,7 +1054,7 @@ mod tests {
         );
         params2.insert("rule_id".to_string(), Value::string("dispatch.default"));
         let instr2 = GenericInstruction::new("trace_step", params2);
-        state = audit_ops::exec_trace_step(&reg, &state, &instr2).unwrap();
+        state = audit_ops::exec_trace_step(&reg, &state, &instr2, &mut ctx).unwrap();
 
         let chain_val = state.get("__audit_chain").cloned().unwrap();
         let chain = AuditChainState::from_value(&chain_val).unwrap();
@@ -1078,13 +1090,14 @@ mod tests {
 
         let reg = InstructionRegistry::new();
         let state = State::new(vec![("x", Value::Integer(1))]);
+        let mut ctx = ExecCtlCtx::new();
 
         let mut params = HashMap::new();
         params.insert("label".to_string(), Value::string("step"));
         params.insert("rule_id".to_string(), Value::string("test.rule"));
         let instr = GenericInstruction::new("trace_step", params);
 
-        let result = audit_ops::exec_trace_step(&reg, &state, &instr).unwrap();
+        let result = audit_ops::exec_trace_step(&reg, &state, &instr, &mut ctx).unwrap();
         let chain_val = result.get("__audit_chain").cloned().unwrap();
         let chain = AuditChainState::from_value(&chain_val).unwrap();
 
@@ -1111,6 +1124,7 @@ mod tests {
 
         let reg = InstructionRegistry::new();
         let mut state = State::new(vec![("x", Value::Integer(0))]);
+        let mut ctx = ExecCtlCtx::new();
 
         // Execute 3 steps, simulating: increment → set_value → trace
         let steps = vec![
@@ -1124,7 +1138,7 @@ mod tests {
             params.insert("label".to_string(), Value::string(*label));
             params.insert("rule_id".to_string(), Value::string(*rule_id));
             let instr = GenericInstruction::new("trace_step", params);
-            state = audit_ops::exec_trace_step(&reg, &state, &instr).unwrap();
+            state = audit_ops::exec_trace_step(&reg, &state, &instr, &mut ctx).unwrap();
         }
 
         let chain_val = state.get("__audit_chain").cloned().unwrap();
@@ -1170,6 +1184,7 @@ mod tests {
 
         let reg = InstructionRegistry::new();
         let mut state = State::new(vec![("x", Value::Integer(0))]);
+        let mut ctx = ExecCtlCtx::new();
 
         // Simulate multi-round while_loop execution tracking
         for round in 0..3 {
@@ -1183,7 +1198,7 @@ mod tests {
                 Value::string(format!("while_loop.round_{}", round)),
             );
             let instr = GenericInstruction::new("trace_step", params);
-            state = audit_ops::exec_trace_step(&reg, &state, &instr).unwrap();
+            state = audit_ops::exec_trace_step(&reg, &state, &instr, &mut ctx).unwrap();
 
             // Each round also has dispatch tracking inside it
             let mut inner_params = HashMap::new();
@@ -1196,7 +1211,7 @@ mod tests {
                 Value::string(format!("dispatch.case.round_{}", round)),
             );
             let inner_instr = GenericInstruction::new("trace_step", inner_params);
-            state = audit_ops::exec_trace_step(&reg, &state, &inner_instr).unwrap();
+            state = audit_ops::exec_trace_step(&reg, &state, &inner_instr, &mut ctx).unwrap();
         }
 
         let chain_val = state.get("__audit_chain").cloned().unwrap();
@@ -1329,6 +1344,30 @@ mod tests {
         assert!(
             !rec.verify(DEFAULT_HMAC_KEY),
             "Control: tampering with rule_id must cause verify() to fail"
+        );
+    }
+
+    // ══════════════════════════════════════════════
+    // BUG-03 regression test: version field is now included in HMAC signature
+    // ══════════════════════════════════════════════
+    // Original issue: compute_hash() signed 11 fields, but version was not included.
+    // Consequence: attacker could tamper with record.version without breaking the hash chain.
+    // Fix: compute_hash() adds version parameter, new() and verify() updated accordingly.
+    // After fix: tampering with version should cause verify() to return false.
+    #[test]
+    fn poc_tamper_version_still_verifies() {
+        let mut rec = make_baseline_record();
+        assert!(rec.verify(DEFAULT_HMAC_KEY));
+
+        // Tamper version: change from 3 to 99
+        assert_eq!(rec.version, 3, "Baseline record should be version 3");
+        rec.version = 99;
+
+        // Expectation: verify() should return false after version tampering (version is signed)
+        assert!(
+            !rec.verify(DEFAULT_HMAC_KEY),
+            "BUG-03 regression: tampering with version must cause verify() to return false, \
+             but it returned true — version field was not included in HMAC signature"
         );
     }
 }

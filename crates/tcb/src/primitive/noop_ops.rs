@@ -47,6 +47,7 @@
 //! The concept of a no-op instruction is universal across languages.
 
 use crate::error::EvoRuleError;
+use crate::exec_ctl_ctx::ExecCtlCtx;
 use crate::instruction::registry::InstructionRegistry;
 use crate::rule::GenericInstruction;
 use crate::state::State;
@@ -72,6 +73,7 @@ pub(crate) fn exec_noop(
     _reg: &InstructionRegistry,
     state: &State,
     _instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     Ok(state.clone())
 }
@@ -94,7 +96,8 @@ mod tests {
         ]);
         let instr = GenericInstruction::simple("noop");
 
-        let result = exec_noop(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_noop(&reg, &state, &instr, &mut ctx).unwrap();
 
         assert_eq!(result.get("x"), Some(&crate::value::Value::Integer(42)));
         assert_eq!(
@@ -110,7 +113,8 @@ mod tests {
         let state = State::empty();
         let instr = GenericInstruction::simple("noop");
 
-        let result = exec_noop(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_noop(&reg, &state, &instr, &mut ctx).unwrap();
 
         // Empty state remains empty after noop
         assert!(result.data().is_empty());
@@ -123,7 +127,8 @@ mod tests {
         let state = State::new(vec![("x", crate::value::Value::Integer(1))]);
         let instr = GenericInstruction::simple("noop");
 
-        let result = exec_noop(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_noop(&reg, &state, &instr, &mut ctx).unwrap();
 
         // Verify contents are the same
         assert_eq!(result.get("x"), state.get("x"));

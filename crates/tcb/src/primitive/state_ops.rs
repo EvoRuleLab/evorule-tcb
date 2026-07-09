@@ -65,7 +65,8 @@
 //! `ContextOpFn` type and are deterministic.
 
 use crate::control::dispatch::resolve_path;
-use crate::error::{invalid_config, EvoRuleError};
+use crate::error::{invalid_config, invalid_param, missing_param, type_error, EvoRuleError};
+use crate::exec_ctl_ctx::ExecCtlCtx;
 use crate::instruction::registry::InstructionRegistry;
 use crate::rule::GenericInstruction;
 use crate::state::State;
@@ -103,27 +104,27 @@ pub(crate) fn exec_state_set(
     _reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let attr = instruction
         .params
         .get("attr")
-        .cloned()
-        .unwrap_or(Value::Null);
+        .ok_or_else(|| missing_param("state_set", "attr"))?;
     let val = instruction
         .params
         .get("value")
         .cloned()
         .unwrap_or(Value::Null);
 
-    let resolved_attr = resolve_path(state, &attr);
+    let resolved_attr = resolve_path(state, attr);
     let resolved_val = resolve_path(state, &val);
 
     let attr_str = match &resolved_attr {
         Value::String(s) => s.clone(),
-        _ => return Ok(state.clone()),
+        _ => return Err(type_error("String", resolved_attr.type_name())),
     };
 
-    Ok(state.set_path(&attr_str, resolved_val))
+    state.set_path(&attr_str, resolved_val)
 }
 
 /// Compute + assignment — executes a computation on `attr` and writes the result.
@@ -155,12 +156,12 @@ pub(crate) fn exec_state_compute(
     reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let attr = instruction
         .params
         .get("attr")
-        .cloned()
-        .unwrap_or(Value::Null);
+        .ok_or_else(|| missing_param("state_compute", "attr"))?;
     let op = instruction
         .params
         .get("operation")
@@ -181,12 +182,12 @@ pub(crate) fn exec_state_compute(
         }
     }
 
-    let resolved_attr = resolve_path(state, &attr);
+    let resolved_attr = resolve_path(state, attr);
     let resolved_val = resolve_path(state, &val);
 
     let attr_str = match &resolved_attr {
         Value::String(s) => s.clone(),
-        _ => return Ok(state.clone()),
+        _ => return Err(type_error("String", resolved_attr.type_name())),
     };
     let op_str = match &op {
         Value::String(s) => s.clone(),
@@ -198,7 +199,7 @@ pub(crate) fn exec_state_compute(
         .get_context_operation(op_str.as_str())
         .map_or(resolved_val.clone(), |op_fn| op_fn(&old_val, &resolved_val));
 
-    Ok(state.set_path(&attr_str, new_val))
+    state.set_path(&attr_str, new_val)
 }
 
 /// Set context — directly modifies top-level State attributes.
@@ -231,6 +232,7 @@ pub(crate) fn exec_set_context(
     reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let spec_raw = instruction
         .params
@@ -240,10 +242,12 @@ pub(crate) fn exec_set_context(
 
     let spec_map = match &spec_raw {
         Value::Object(m) => m,
-        _ => return Ok(state.clone()),
+        _ => return Err(invalid_param("set_context", "transform", "expected Object")),
     };
 
-    let attr = spec_map.get("attr").cloned().unwrap_or(Value::Null);
+    let attr = spec_map
+        .get("attr")
+        .ok_or_else(|| missing_param("set_context", "attr"))?;
     let op = spec_map
         .get("operation")
         .cloned()
@@ -265,12 +269,12 @@ pub(crate) fn exec_set_context(
         }
     }
 
-    let resolved_attr = resolve_path(state, &attr);
+    let resolved_attr = resolve_path(state, attr);
     let resolved_val = resolve_path(state, &val_val);
 
     let attr_str = match &resolved_attr {
         Value::String(s) => s.clone(),
-        _ => return Ok(state.clone()),
+        _ => return Err(type_error("String", resolved_attr.type_name())),
     };
     let op_str = match &op {
         Value::String(s) => s.clone(),
@@ -285,7 +289,7 @@ pub(crate) fn exec_set_context(
         _ => resolved_val,
     };
 
-    Ok(state.set_path(&attr_str, new_val))
+    state.set_path(&attr_str, new_val)
 }
 
 // ══════════════════════════════════════════════
@@ -317,7 +321,8 @@ mod tests {
         let instr = GenericInstruction::new("set_context", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_set_context(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_context(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("x"), Some(&Value::Integer(42)));
     }
 
@@ -336,7 +341,8 @@ mod tests {
         let instr = GenericInstruction::new("set_context", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_set_context(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_context(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("x"), Some(&Value::Integer(15)));
     }
 
@@ -360,7 +366,8 @@ mod tests {
         let instr = GenericInstruction::new("set_context", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_set_context(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_context(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(
             result.get("x"),
             Some(&Value::Integer(30)),
@@ -383,7 +390,8 @@ mod tests {
         let instr = GenericInstruction::new("set_context", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_set_context(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_context(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(
             result.get("x"),
             Some(&Value::Integer(5)),
@@ -401,7 +409,7 @@ mod tests {
             ])),
         );
         let instr = GenericInstruction::new("set_context", params);
-        let result = exec_set_context(&reg, &state, &instr).unwrap();
+        let result = exec_set_context(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(
             result.get("x"),
             Some(&Value::Integer(10)),
@@ -424,7 +432,8 @@ mod tests {
         let instr = GenericInstruction::new("set_context", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_set_context(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_context(&reg, &state, &instr, &mut ctx).unwrap();
         match result.get("xs") {
             Some(Value::List(items)) => {
                 assert_eq!(items.len(), 1, "list should have 1 element after append");
@@ -456,7 +465,8 @@ mod tests {
         let instr = GenericInstruction::new("set_context", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_set_context(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_context(&reg, &state, &instr, &mut ctx).unwrap();
         match result.get("xs") {
             Some(Value::List(items)) => {
                 assert_eq!(items.len(), 2, "list should have 2 elements after remove");
@@ -484,7 +494,8 @@ mod tests {
         let instr = GenericInstruction::new("state_set", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_set(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_set(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("x"), Some(&Value::Integer(42)));
     }
 
@@ -497,7 +508,8 @@ mod tests {
         let instr = GenericInstruction::new("state_set", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_set(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_set(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("y"), Some(&Value::string("hello")));
         // Original attribute unchanged
         assert_eq!(result.get("x"), Some(&Value::Integer(10)));
@@ -513,7 +525,8 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("x"), Some(&Value::Integer(15)));
     }
 
@@ -527,7 +540,8 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("x"), Some(&Value::Integer(7)));
     }
 
@@ -541,7 +555,8 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("x"), Some(&Value::Integer(30)));
     }
 
@@ -555,7 +570,8 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr);
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx);
         assert!(
             result.is_err(),
             "state_compute should reject illegal operation"
@@ -585,7 +601,8 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(
             result.get("x"),
             Some(&Value::Integer(5)),
@@ -598,7 +615,7 @@ mod tests {
         params.insert("operation".to_string(), Value::string("div"));
         params.insert("value".to_string(), Value::Integer(0));
         let instr = GenericInstruction::new("state_compute", params);
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(
             result.get("x"),
             Some(&Value::Integer(10)),
@@ -616,7 +633,8 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx).unwrap();
         match result.get("xs") {
             Some(Value::List(items)) => {
                 assert_eq!(items.len(), 1, "list should have 1 element after append");
@@ -643,7 +661,8 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx).unwrap();
         match result.get("xs") {
             Some(Value::List(items)) => {
                 assert_eq!(items.len(), 2, "list should have 2 elements after remove");
@@ -676,7 +695,8 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(
             result.get("n"),
             Some(&Value::Integer(3)),
@@ -694,7 +714,8 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(
             result.get("n"),
             Some(&Value::Integer(0)),
@@ -713,7 +734,8 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(
             result.get("n"),
             Some(&Value::Integer(0)),
@@ -724,26 +746,24 @@ mod tests {
     // ── B. Silent fallthrough contract (attr non-String → silently return original state) ──
 
     #[test]
-    fn test_state_set_null_attr_returns_state_unchanged() {
-        // attr = Value::Null should silently return original state, no modification
-        let state = make_test_state(); // x = 10
+    fn test_state_set_null_attr_returns_error() {
+        let state = make_test_state();
         let mut params = HashMap::new();
         params.insert("attr".to_string(), Value::Null);
         params.insert("value".to_string(), Value::Integer(42));
         let instr = GenericInstruction::new("state_set", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_set(&reg, &state, &instr).unwrap();
-        assert_eq!(
-            result.get("x"),
-            Some(&Value::Integer(10)),
-            "state_set with attr=Null should silently retain original x value"
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_set(&reg, &state, &instr, &mut ctx);
+        assert!(
+            result.is_err(),
+            "state_set with attr=Null should return error"
         );
     }
 
     #[test]
-    fn test_state_compute_null_attr_returns_state_unchanged() {
-        // attr = Value::Null should silently return original state, even if operation is valid
+    fn test_state_compute_null_attr_returns_error() {
         let state = make_test_state();
         let mut params = HashMap::new();
         params.insert("attr".to_string(), Value::Null);
@@ -752,17 +772,16 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
-        assert_eq!(
-            result.get("x"),
-            Some(&Value::Integer(10)),
-            "state_compute with attr=Null should silently retain original x value, not apply add"
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx);
+        assert!(
+            result.is_err(),
+            "state_compute with attr=Null should return error"
         );
     }
 
     #[test]
-    fn test_set_context_null_attr_returns_state_unchanged() {
-        // attr = Value::Null (inside transform) should silently return original state
+    fn test_set_context_null_attr_returns_error() {
         let state = make_test_state();
         let mut params = HashMap::new();
         params.insert(
@@ -776,11 +795,11 @@ mod tests {
         let instr = GenericInstruction::new("set_context", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_set_context(&reg, &state, &instr).unwrap();
-        assert_eq!(
-            result.get("x"),
-            Some(&Value::Integer(10)),
-            "set_context with transform.attr=Null should silently retain original x value"
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_context(&reg, &state, &instr, &mut ctx);
+        assert!(
+            result.is_err(),
+            "set_context with transform.attr=Null should return error"
         );
     }
 
@@ -803,7 +822,8 @@ mod tests {
         let instr = GenericInstruction::new("set_context", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_set_context(&reg, &state, &instr);
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_context(&reg, &state, &instr, &mut ctx);
         assert!(
             result.is_err(),
             "set_context should reject illegal operation"
@@ -825,7 +845,8 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx).unwrap();
         // Non-String op falls through to "add" default
         assert_eq!(
             result.get("x"),
@@ -845,7 +866,8 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(
             result.get("x"),
             Some(&Value::Integer(15)),
@@ -864,12 +886,9 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
-        assert_eq!(
-            result.get("x"),
-            Some(&Value::Integer(10)),
-            "non-String attr should return state unchanged"
-        );
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx);
+        assert!(result.is_err(), "non-String attr should return error");
     }
 
     #[test]
@@ -884,7 +903,8 @@ mod tests {
         let instr = GenericInstruction::new("state_compute", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_state_compute(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx).unwrap();
         // add with Null value → depends on add op behavior with Null
         // (verify no panic; exact value depends on op_fn implementation)
         assert!(
@@ -894,34 +914,146 @@ mod tests {
     }
 
     #[test]
-    fn test_set_context_missing_transform_returns_state_unchanged() {
-        // Missing "transform" param → spec_raw is empty Object → returns state unchanged
+    fn test_set_context_missing_transform_returns_error() {
         let state = make_test_state();
         let instr = GenericInstruction::new("set_context", HashMap::new());
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_set_context(&reg, &state, &instr).unwrap();
-        assert_eq!(
-            result.get("x"),
-            Some(&Value::Integer(10)),
-            "missing transform should return state unchanged"
-        );
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_context(&reg, &state, &instr, &mut ctx);
+        assert!(result.is_err(), "missing transform should return error");
     }
 
     #[test]
-    fn test_set_context_non_object_transform_returns_state_unchanged() {
-        // transform is a non-Object value (Integer) → returns state unchanged
+    fn test_set_context_non_object_transform_returns_error() {
         let state = make_test_state();
         let mut params = HashMap::new();
         params.insert("transform".to_string(), Value::Integer(42));
         let instr = GenericInstruction::new("set_context", params);
 
         let reg = InstructionRegistry::new().with_default_context_ops();
-        let result = exec_set_context(&reg, &state, &instr).unwrap();
-        assert_eq!(
-            result.get("x"),
-            Some(&Value::Integer(10)),
-            "non-Object transform should return state unchanged"
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_context(&reg, &state, &instr, &mut ctx);
+        assert!(result.is_err(), "non-Object transform should return error");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Property-based tests (proptest) for error handling
+    // ═══════════════════════════════════════════════════════════════════════
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_state_set_non_string_attr_returns_error(attr in prop_oneof![
+            Just(Value::Null),
+            any::<i64>().prop_map(Value::Integer),
+            any::<bool>().prop_map(Value::Bool),
+            prop::collection::vec(any::<i64>(), 0..5).prop_map(|v| Value::list(v.into_iter().map(Value::Integer).collect())),
+        ]) {
+            let state = make_test_state();
+            let mut params = HashMap::new();
+            params.insert("attr".to_string(), attr);
+            params.insert("value".to_string(), Value::Integer(42));
+            let instr = GenericInstruction::new("state_set", params);
+
+            let reg = InstructionRegistry::new().with_default_context_ops();
+            let mut ctx = ExecCtlCtx::new();
+            let result = exec_state_set(&reg, &state, &instr, &mut ctx);
+            prop_assert!(result.is_err(), "state_set with non-String attr should return error");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_state_compute_non_string_attr_returns_error(attr in prop_oneof![
+            Just(Value::Null),
+            any::<i64>().prop_map(Value::Integer),
+            any::<bool>().prop_map(Value::Bool),
+        ]) {
+            let state = make_test_state();
+            let mut params = HashMap::new();
+            params.insert("attr".to_string(), attr);
+            params.insert("operation".to_string(), Value::string("add"));
+            params.insert("value".to_string(), Value::Integer(5));
+            let instr = GenericInstruction::new("state_compute", params);
+
+            let reg = InstructionRegistry::new().with_default_context_ops();
+            let mut ctx = ExecCtlCtx::new();
+            let result = exec_state_compute(&reg, &state, &instr, &mut ctx);
+            prop_assert!(result.is_err(), "state_compute with non-String attr should return error");
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // P3-2 Explicit Error Tests (Phase 3)
+    // Verify that missing required parameters return explicit errors
+    // instead of silent fallthrough
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_state_set_missing_attr_returns_error() {
+        let state = make_test_state();
+        let mut params = HashMap::new();
+        params.insert("value".to_string(), Value::Integer(42));
+        let instr = GenericInstruction::new("state_set", params);
+
+        let reg = InstructionRegistry::new().with_default_context_ops();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_set(&reg, &state, &instr, &mut ctx);
+        assert!(
+            result.is_err(),
+            "state_set with missing attr should return error"
         );
+        if let Err(EvoRuleError::MissingParam { context, param }) = result {
+            assert_eq!(context, "state_set");
+            assert_eq!(param, "attr");
+        }
+    }
+
+    #[test]
+    fn test_state_compute_missing_attr_returns_error() {
+        let state = make_test_state();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::string("add"));
+        params.insert("value".to_string(), Value::Integer(5));
+        let instr = GenericInstruction::new("state_compute", params);
+
+        let reg = InstructionRegistry::new().with_default_context_ops();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_state_compute(&reg, &state, &instr, &mut ctx);
+        assert!(
+            result.is_err(),
+            "state_compute with missing attr should return error"
+        );
+        if let Err(EvoRuleError::MissingParam { context, param }) = result {
+            assert_eq!(context, "state_compute");
+            assert_eq!(param, "attr");
+        }
+    }
+
+    #[test]
+    fn test_set_context_missing_attr_returns_error() {
+        let state = make_test_state();
+        let mut params = HashMap::new();
+        params.insert(
+            "transform".to_string(),
+            Value::from(im::HashMap::from(vec![
+                ("operation".to_string(), Value::string("add")),
+                ("value".to_string(), Value::Integer(5)),
+            ])),
+        );
+        let instr = GenericInstruction::new("set_context", params);
+
+        let reg = InstructionRegistry::new().with_default_context_ops();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_context(&reg, &state, &instr, &mut ctx);
+        assert!(
+            result.is_err(),
+            "set_context with missing attr should return error"
+        );
+        if let Err(EvoRuleError::MissingParam { context, param }) = result {
+            assert_eq!(context, "set_context");
+            assert_eq!(param, "attr");
+        }
     }
 }

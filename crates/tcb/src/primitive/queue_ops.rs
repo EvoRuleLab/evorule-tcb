@@ -68,7 +68,8 @@
 //! The queue semantics are defined by the TCB and are not language-agnostic.
 
 use crate::domain::Domain;
-use crate::error::EvoRuleError;
+use crate::error::{type_error, EvoRuleError};
+use crate::exec_ctl_ctx::ExecCtlCtx;
 use crate::instruction::registry::InstructionRegistry;
 use crate::rule::GenericInstruction;
 use crate::state::State;
@@ -120,6 +121,7 @@ pub(crate) fn exec_advance_instruction(
     _reg: &InstructionRegistry,
     state: &State,
     _instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let queue = get_queue(state);
 
@@ -175,6 +177,7 @@ pub(crate) fn exec_push_instruction(
     reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let new_instr = instruction
         .params
@@ -209,6 +212,7 @@ pub(crate) fn exec_push_instruction_sequence(
     reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let instructions = instruction
         .params
@@ -272,6 +276,7 @@ pub(crate) fn exec_instruction_sequence(
     reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let instructions = instruction
         .params
@@ -281,10 +286,7 @@ pub(crate) fn exec_instruction_sequence(
 
     let instr_list = match &instructions {
         Value::List(v) => v,
-        _ => {
-            // instructions is not a list, skipping
-            return Ok(state.clone());
-        }
+        _ => return Err(type_error("List", instructions.type_name())),
     };
 
     let mut current_state = state.clone();
@@ -300,7 +302,7 @@ pub(crate) fn exec_instruction_sequence(
         let child_instr = GenericInstruction::from_value(item)?;
 
         // Execute the child instruction
-        match reg.execute(&current_state, &child_instr) {
+        match reg.execute(&current_state, &child_instr, ctx) {
             Ok(new_state) => {
                 current_state = new_state;
             }
@@ -347,7 +349,8 @@ mod tests {
         let state = State::empty().set("__exec__", exec);
 
         let instr = GenericInstruction::simple("advance_instruction");
-        let result = exec_advance_instruction(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_advance_instruction(&reg, &state, &instr, &mut ctx).unwrap();
 
         let new_exec = result
             .get("__exec__")
@@ -384,8 +387,9 @@ mod tests {
             )])),
         );
         let instr = GenericInstruction::new("push_instruction", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_push_instruction(&reg, &state, &instr).unwrap();
+        let result = exec_push_instruction(&reg, &state, &instr, &mut ctx).unwrap();
         let queue = result
             .get("__exec__")
             .and_then(|v| v.get("queue"))
@@ -412,7 +416,8 @@ mod tests {
         let state = State::empty().set("__exec__", exec);
 
         let instr = GenericInstruction::simple("advance_instruction");
-        let result = exec_advance_instruction(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_advance_instruction(&reg, &state, &instr, &mut ctx).unwrap();
 
         let new_instr = result
             .get("__exec__")
@@ -445,7 +450,8 @@ mod tests {
         let state = State::empty().set("__exec__", exec);
 
         let instr = GenericInstruction::simple("advance_instruction");
-        let result = exec_advance_instruction(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_advance_instruction(&reg, &state, &instr, &mut ctx).unwrap();
 
         // Verify __running was set to false
         let running = result
@@ -477,7 +483,8 @@ mod tests {
         let state = State::empty().set("__exec__", exec);
 
         let instr = GenericInstruction::simple("advance_instruction");
-        let result = exec_advance_instruction(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_advance_instruction(&reg, &state, &instr, &mut ctx).unwrap();
 
         // Verify __running remains true (not terminated)
         let running = result
@@ -510,8 +517,9 @@ mod tests {
         ]);
         let params = std::collections::HashMap::from([("instructions".to_string(), instructions)]);
         let instr = GenericInstruction::new("push_instruction_sequence", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_push_instruction_sequence(&reg, &state, &instr).unwrap();
+        let result = exec_push_instruction_sequence(&reg, &state, &instr, &mut ctx).unwrap();
         let queue = result
             .get("__exec__")
             .and_then(|v| v.get("queue"))
@@ -539,8 +547,9 @@ mod tests {
         });
         let params = std::collections::HashMap::from([("instructions".to_string(), single_instr)]);
         let instr = GenericInstruction::new("push_instruction_sequence", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_push_instruction_sequence(&reg, &state, &instr).unwrap();
+        let result = exec_push_instruction_sequence(&reg, &state, &instr, &mut ctx).unwrap();
         let queue = result
             .get("__exec__")
             .and_then(|v| v.get("queue"))
@@ -581,8 +590,9 @@ mod tests {
         ]);
         let params = std::collections::HashMap::from([("instructions".to_string(), instructions)]);
         let instr = GenericInstruction::new("instruction_sequence", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_instruction_sequence(&reg, &state, &instr).unwrap();
+        let result = exec_instruction_sequence(&reg, &state, &instr, &mut ctx).unwrap();
 
         // Verify both instructions executed; state contains a and b
         assert_eq!(result.get("a"), Some(&Value::Integer(1)));
@@ -611,8 +621,9 @@ mod tests {
         ]);
         let params = std::collections::HashMap::from([("instructions".to_string(), instructions)]);
         let instr = GenericInstruction::new("instruction_sequence", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_instruction_sequence(&reg, &state, &instr);
+        let result = exec_instruction_sequence(&reg, &state, &instr, &mut ctx);
         // Second instruction is unregistered, should return an error
         assert!(result.is_err());
     }
@@ -665,7 +676,8 @@ mod tests {
         let state = State::empty().set("__exec__", exec);
 
         let instr = GenericInstruction::simple("advance_instruction");
-        let result = exec_advance_instruction(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_advance_instruction(&reg, &state, &instr, &mut ctx).unwrap();
 
         let queue = result
             .get("__exec__")
@@ -699,7 +711,8 @@ mod tests {
         let state = State::empty().set("__exec__", exec);
 
         let instr = GenericInstruction::simple("advance_instruction");
-        let result = exec_advance_instruction(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_advance_instruction(&reg, &state, &instr, &mut ctx).unwrap();
 
         let new_instr = result
             .get("__exec__")
@@ -726,8 +739,9 @@ mod tests {
         let params =
             std::collections::HashMap::from([("instructions".to_string(), Value::empty_list())]);
         let instr = GenericInstruction::new("push_instruction_sequence", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_push_instruction_sequence(&reg, &state, &instr).unwrap();
+        let result = exec_push_instruction_sequence(&reg, &state, &instr, &mut ctx).unwrap();
         let queue = result
             .get("__exec__")
             .and_then(|v| v.get("queue"))
@@ -751,8 +765,9 @@ mod tests {
         let params =
             std::collections::HashMap::from([("instructions".to_string(), Value::empty_list())]);
         let instr = GenericInstruction::new("instruction_sequence", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_instruction_sequence(&reg, &state, &instr).unwrap();
+        let result = exec_instruction_sequence(&reg, &state, &instr, &mut ctx).unwrap();
         // Empty list should return a clone of the original state (including __exec__)
         assert_eq!(result.get("__exec__"), state.get("__exec__"));
     }
@@ -790,8 +805,9 @@ mod tests {
         ]);
         let params = std::collections::HashMap::from([("instructions".to_string(), instructions)]);
         let instr = GenericInstruction::new("instruction_sequence", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_instruction_sequence(&reg, &state, &instr).unwrap();
+        let result = exec_instruction_sequence(&reg, &state, &instr, &mut ctx).unwrap();
         // First and third should execute, second is skipped
         assert_eq!(result.get("a"), Some(&Value::Integer(1)));
         assert_eq!(result.get("b"), Some(&Value::Integer(2)));
@@ -815,8 +831,9 @@ mod tests {
             }),
         )]);
         let instr = GenericInstruction::new("push_instruction", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_push_instruction(&reg, &state, &instr);
+        let result = exec_push_instruction(&reg, &state, &instr, &mut ctx);
         assert!(result.is_err());
     }
 
@@ -839,8 +856,9 @@ mod tests {
         ]);
         let params = std::collections::HashMap::from([("instructions".to_string(), instructions)]);
         let instr = GenericInstruction::new("push_instruction_sequence", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_push_instruction_sequence(&reg, &state, &instr);
+        let result = exec_push_instruction_sequence(&reg, &state, &instr, &mut ctx);
         assert!(result.is_err());
 
         // Verify the queue was not modified
@@ -871,8 +889,9 @@ mod tests {
         ]);
         let params = std::collections::HashMap::from([("instructions".to_string(), instructions)]);
         let instr = GenericInstruction::new("push_instruction_sequence", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_push_instruction_sequence(&reg, &state, &instr).unwrap();
+        let result = exec_push_instruction_sequence(&reg, &state, &instr, &mut ctx).unwrap();
         let queue = result
             .get("__exec__")
             .and_then(|v| v.get("queue"))
@@ -901,7 +920,8 @@ mod tests {
         let state = State::empty().set("__exec__", exec);
 
         let instr = GenericInstruction::simple("advance_instruction");
-        let result = exec_advance_instruction(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_advance_instruction(&reg, &state, &instr, &mut ctx).unwrap();
 
         let new_instr = result
             .get("__exec__")
@@ -933,8 +953,9 @@ mod tests {
             }),
         )]);
         let instr = GenericInstruction::new("push_instruction", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_push_instruction(&reg, &state, &instr).unwrap();
+        let result = exec_push_instruction(&reg, &state, &instr, &mut ctx).unwrap();
         let queue = result
             .get("__exec__")
             .and_then(|v| v.get("queue"))

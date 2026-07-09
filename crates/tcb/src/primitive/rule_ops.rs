@@ -76,11 +76,12 @@
 
 #![allow(clippy::items_after_test_module)] // test mod in middle (section 51 work, high risk to move)
 use crate::control::dispatch::resolve_path;
-use crate::error::EvoRuleError;
+use crate::error::{missing_param, rule_not_found, EvoRuleError};
+use crate::exec_ctl_ctx::ExecCtlCtx;
 use crate::instruction::registry::InstructionRegistry;
 use crate::rule::GenericInstruction;
 use crate::state::State;
-use crate::value::Value;
+use crate::value::{ImMapExt, Value};
 
 /// Register rule primitives.
 pub fn register(reg: &mut InstructionRegistry) {
@@ -279,9 +280,15 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("apply_rule", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result =
-            exec_apply_rule(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let result = exec_apply_rule(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         assert_eq!(result.get("x"), Some(&Value::Integer(42)));
     }
 
@@ -309,9 +316,15 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("apply_rule", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result =
-            exec_apply_rule(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let result = exec_apply_rule(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         // x was modified by the transform
         assert_eq!(result.get("x"), Some(&Value::Integer(99)));
         // snapshot stores the filtered complete state (excluding system fields), containing x=99
@@ -320,19 +333,18 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_rule_no_rule_returns_original() {
-        // No rule provided → returns original state
+    fn test_apply_rule_no_rule_returns_error() {
         let state = State::empty().set("x", Value::Integer(5));
         let params = HashMap::new();
         let instr = GenericInstruction::new("apply_rule", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_apply_rule(&make_reg(), &state, &instr).unwrap();
-        assert_eq!(result.get("x"), Some(&Value::Integer(5)));
+        let result = exec_apply_rule(&make_reg(), &state, &instr, &mut ctx);
+        assert!(result.is_err(), "missing rule should return error");
     }
 
     #[test]
-    fn test_apply_rule_rule_without_transform_returns_original() {
-        // Rule object with no transform → returns original state
+    fn test_apply_rule_rule_without_transform_returns_error() {
         let state = State::empty().set("x", Value::Integer(5));
         let rule_obj = Value::from(im::HashMap::from(vec![(
             "rule_id".to_string(),
@@ -344,9 +356,13 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("apply_rule", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_apply_rule(&make_reg(), &state, &instr).unwrap();
-        assert_eq!(result.get("x"), Some(&Value::Integer(5)));
+        let result = exec_apply_rule(&make_reg(), &state, &instr, &mut ctx);
+        assert!(
+            result.is_err(),
+            "rule without transform should return error"
+        );
     }
 
     #[test]
@@ -379,9 +395,15 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("apply_rule", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result =
-            exec_apply_rule(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let result = exec_apply_rule(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         let out = result.get("out").unwrap();
         // out should not contain __exec__
         if let Some(obj) = out.as_object() {
@@ -407,8 +429,9 @@ mod tests {
         let state = State::empty().set("__universe_rules__", rules);
         let params = HashMap::new();
         let instr = GenericInstruction::new("observe_rules", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_observe_rules(&make_reg(), &state, &instr).unwrap();
+        let result = exec_observe_rules(&make_reg(), &state, &instr, &mut ctx).unwrap();
         let observed = result.get("rules_list").unwrap();
         assert!(observed.as_list().is_some());
         assert_eq!(observed.as_list().unwrap().len(), 2);
@@ -423,8 +446,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("observe_rules", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_observe_rules(&make_reg(), &state, &instr).unwrap();
+        let result = exec_observe_rules(&make_reg(), &state, &instr, &mut ctx).unwrap();
         assert!(result.get("my_rules").is_some());
     }
 
@@ -433,8 +457,9 @@ mod tests {
         let state = State::empty();
         let params = HashMap::new();
         let instr = GenericInstruction::new("observe_rules", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_observe_rules(&make_reg(), &state, &instr).unwrap();
+        let result = exec_observe_rules(&make_reg(), &state, &instr, &mut ctx).unwrap();
         let observed = result.get("rules_list").unwrap();
         assert!(observed.as_list().is_some());
         assert!(observed.as_list().unwrap().is_empty());
@@ -497,8 +522,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("filter_rules", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_filter_rules(&make_reg(), &state, &instr).unwrap();
+        let result = exec_filter_rules(&make_reg(), &state, &instr, &mut ctx).unwrap();
         let filtered = result.get("filtered_rules").unwrap();
         let list = filtered.as_list().unwrap();
         assert_eq!(list.len(), 1);
@@ -516,8 +542,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("filter_rules", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_filter_rules(&make_reg(), &state, &instr).unwrap();
+        let result = exec_filter_rules(&make_reg(), &state, &instr, &mut ctx).unwrap();
         let filtered = result.get("filtered_rules").unwrap();
         assert_eq!(filtered.as_list().unwrap().len(), 3);
     }
@@ -535,8 +562,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("filter_rules", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_filter_rules(&make_reg(), &state, &instr).unwrap();
+        let result = exec_filter_rules(&make_reg(), &state, &instr, &mut ctx).unwrap();
         let filtered = result.get("filtered_rules").unwrap();
         assert_eq!(filtered.as_list().unwrap().len(), 1);
         assert_eq!(
@@ -562,8 +590,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("filter_rules", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_filter_rules(&make_reg(), &state, &instr).unwrap();
+        let result = exec_filter_rules(&make_reg(), &state, &instr, &mut ctx).unwrap();
         assert!(result.get("my_filtered").is_some());
     }
 
@@ -577,8 +606,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("filter_rules", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_filter_rules(&make_reg(), &state, &instr).unwrap();
+        let result = exec_filter_rules(&make_reg(), &state, &instr, &mut ctx).unwrap();
         let filtered = result.get("filtered_rules").unwrap();
         assert!(filtered.as_list().unwrap().is_empty());
     }
@@ -597,8 +627,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("filter_rules", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_filter_rules(&make_reg(), &state, &instr).unwrap();
+        let result = exec_filter_rules(&make_reg(), &state, &instr, &mut ctx).unwrap();
         let filtered = result.get("filtered_rules").unwrap();
         assert_eq!(filtered.as_list().unwrap().len(), 2);
     }
@@ -623,8 +654,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("inject_rule", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_inject_rule(&reg, &state, &instr).unwrap();
+        let result = exec_inject_rule(&reg, &state, &instr, &mut ctx).unwrap();
         let rules = result.get("__universe_rules__").unwrap();
         let rules_list = rules.as_list().unwrap();
         assert_eq!(rules_list.len(), 1);
@@ -646,8 +678,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("inject_rule", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_inject_rule(&reg, &state, &instr).unwrap();
+        let result = exec_inject_rule(&reg, &state, &instr, &mut ctx).unwrap();
         let info = result.get("__inject_result__").unwrap();
 
         assert_eq!(info.get("added_count"), Some(&Value::Integer(1)));
@@ -676,8 +709,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("inject_rule", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_inject_rule(&reg, &state, &instr).unwrap();
+        let result = exec_inject_rule(&reg, &state, &instr, &mut ctx).unwrap();
         let rules = result.get("__universe_rules__").unwrap();
         let rules_list = rules.as_list().unwrap();
         assert_eq!(rules_list.len(), 1); // count unchanged
@@ -704,8 +738,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("inject_rule", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_inject_rule(&reg, &state, &instr).unwrap();
+        let result = exec_inject_rule(&reg, &state, &instr, &mut ctx).unwrap();
         let rules = result.get("__universe_rules__").unwrap();
         let rules_list = rules.as_list().unwrap();
         assert_eq!(rules_list.len(), 1);
@@ -729,14 +764,76 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("inject_rule", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_inject_rule(&reg, &state, &instr).unwrap();
+        let result = exec_inject_rule(&reg, &state, &instr, &mut ctx).unwrap();
         // Using custom rules_key
         let rules = result.get("my_rules").unwrap();
         assert_eq!(rules.as_list().unwrap().len(), 1);
         // Using custom result_attr
         let info = result.get("my_result").unwrap();
         assert_eq!(info.get("added_count"), Some(&Value::Integer(1)));
+    }
+
+    // ══════════════════════════════════════════════
+    // BUG-06 regression test: inject_rule removed_count reflects actual removals
+    // ══════════════════════════════════════════════
+    // Original issue: removed_count only checked remove_rule_id.is_some(), reporting 1
+    // even when the target rule doesn't exist, which is misleading.
+    // After fix: removed_count reflects the actual number of rules removed from the list.
+    #[test]
+    fn test_inject_rule_removed_count_reflects_actual_removal() {
+        let reg = make_reg();
+        let existing_rules = Value::list(vec![
+            Value::from(im::hashmap! {
+                "rule_id".to_string() => Value::string("rule1"),
+            }),
+            Value::from(im::hashmap! {
+                "rule_id".to_string() => Value::string("rule2"),
+            }),
+        ]);
+        let state = State::empty().set("__universe_rules__", existing_rules);
+
+        // Scenario 1: Remove existing rule → removed_count = 1
+        let params = {
+            let mut p = HashMap::new();
+            p.insert("remove_rule_id".to_string(), Value::string("rule1"));
+            p
+        };
+        let instr = GenericInstruction::new("inject_rule", params);
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_inject_rule(&reg, &state, &instr, &mut ctx).unwrap();
+        let info = result.get("__inject_result__").unwrap();
+        assert_eq!(
+            info.get("removed_count"),
+            Some(&Value::Integer(1)),
+            "Removing existing rule: removed_count should be 1"
+        );
+        assert_eq!(info.get("total_rules"), Some(&Value::Integer(1)));
+
+        // Scenario 2: Remove non-existent rule → removed_count = 0 (was 1 before BUG-06 fix)
+        let params = {
+            let mut p = HashMap::new();
+            p.insert(
+                "remove_rule_id".to_string(),
+                Value::string("nonexistent_rule"),
+            );
+            p
+        };
+        let instr = GenericInstruction::new("inject_rule", params);
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_inject_rule(&reg, &state, &instr, &mut ctx).unwrap();
+        let info = result.get("__inject_result__").unwrap();
+        assert_eq!(
+            info.get("removed_count"),
+            Some(&Value::Integer(0)),
+            "BUG-06 regression: removed_count should be 0 when removing non-existent rule, should not falsely report 1"
+        );
+        assert_eq!(
+            info.get("total_rules"),
+            Some(&Value::Integer(2)),
+            "Rule list should remain unchanged when target doesn't exist"
+        );
     }
 }
 
@@ -758,6 +855,7 @@ pub(crate) fn exec_apply_rule(
     reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let rule_raw = instruction.params.get("rule").cloned();
     let rule_val = rule_raw.map(|v| resolve_path(state, &v)).or_else(|| {
@@ -788,16 +886,18 @@ pub(crate) fn exec_apply_rule(
 
     let rule_obj = match rule_val {
         Some(v) => v,
-        None => return Ok(state.clone()),
+        None => {
+            return Err(rule_not_found("unknown"));
+        }
     };
 
     let transform = match rule_obj.get("transform") {
         Some(t) => t.clone(),
-        None => return Ok(state.clone()),
+        None => return Err(missing_param("apply_rule", "transform")),
     };
 
     let transform_instr = GenericInstruction::from_value(&transform)?;
-    let result = reg.execute(state, &transform_instr)?;
+    let result = reg.execute(state, &transform_instr, ctx)?;
 
     match instruction.params.get("result_attr") {
         Some(attr_val) => {
@@ -811,7 +911,7 @@ pub(crate) fn exec_apply_rule(
                     let filtered = match &result_val {
                         Value::Object(m) => {
                             let filtered: im::HashMap<String, Value> = m
-                                .iter()
+                                .iter_sorted()
                                 .filter(|(k, _)| !k.starts_with("__"))
                                 .map(|(k, v)| (k.clone(), v.clone()))
                                 .collect();
@@ -819,7 +919,7 @@ pub(crate) fn exec_apply_rule(
                         }
                         other => other.clone(),
                     };
-                    Ok(result.set(&s, filtered))
+                    Ok(result.set(s, filtered))
                 }
                 _ => Ok(result),
             }
@@ -840,6 +940,7 @@ pub(crate) fn exec_observe_rules(
     _reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let result_attr = instruction
         .params
@@ -856,7 +957,7 @@ pub(crate) fn exec_observe_rules(
         .cloned()
         .unwrap_or(Value::empty_list());
 
-    Ok(state.set_path(&result_attr, rules))
+    state.set_path(&result_attr, rules)
 }
 
 /// Filter the rule set — filter rules by condition.
@@ -886,6 +987,7 @@ pub(crate) fn exec_filter_rules(
     _reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let rules_ref = instruction
         .params
@@ -938,7 +1040,7 @@ pub(crate) fn exec_filter_rules(
         _ => Value::empty_list(),
     };
 
-    Ok(state.set_path(&result_attr, filtered))
+    state.set_path(&result_attr, filtered)
 }
 
 /// Check whether a rule's domain references any of the target attributes.
@@ -1039,6 +1141,7 @@ pub(crate) fn exec_inject_rule(
     _reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let rules_key = instruction
         .params
@@ -1077,6 +1180,7 @@ pub(crate) fn exec_inject_rule(
 
     // Filter out the rule to be removed
     let mut new_rules = rules_list;
+    let len_before = new_rules.len();
     if let Some(ref rule_id) = remove_rule_id {
         new_rules = new_rules
             .into_iter()
@@ -1087,6 +1191,10 @@ pub(crate) fn exec_inject_rule(
             })
             .collect();
     }
+    // BUG-06 fix: removed_count originally only checked remove_rule_id.is_some(),
+    // reporting 1 even when the target rule doesn't exist, which was misleading.
+    // Changed to reflect actual number of removed rules.
+    let actually_removed = len_before - new_rules.len();
 
     // Add the new rule
     let mut replaced = false;
@@ -1114,17 +1222,16 @@ pub(crate) fn exec_inject_rule(
     }
 
     // Construct result information
-    // - removed_count: counts only removals triggered by remove_rule_id
+    // - removed_count: actual number of rules removed (BUG-06 fix: was falsely reported as remove_rule_id.is_some())
     // - replaced_count: counts only add_rule replacements of existing rules with the same ID
     // - added_count: rules added to the end of the list (excluding replacements)
     let result_info = Value::Object(im::hashmap! {
-        "removed_count".to_string() => Value::Integer(i64::from(remove_rule_id.is_some())),
+        "removed_count".to_string() => Value::Integer(actually_removed as i64),
         "replaced_count".to_string() => Value::Integer(i64::from(replaced)),
         "added_count".to_string() => Value::Integer(i64::from(add_rule.is_some() && !replaced)),
         "total_rules".to_string() => Value::Integer(new_rules.len() as i64),
     });
 
-    Ok(state
-        .set_path(&rules_key, Value::List(new_rules))
-        .set_path(&result_attr, result_info))
+    let state = state.set_path(&rules_key, Value::List(new_rules))?;
+    state.set_path(&result_attr, result_info)
 }

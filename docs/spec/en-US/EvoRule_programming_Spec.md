@@ -17,15 +17,15 @@
 
 ### 0.2 Reading Path (by Role)
 
-| Your Role | Step 1 | Step 2 | Step 3 | Optional |
-|-----------|--------|--------|--------|----------|
-| **First contact with EvoRule** | §1 Paradigm Awareness | §4 JSON Rule Format | §5 Decision Framework | §13 Three Maxims |
-| **Ready to write code** | §2 Responsibility Boundaries | §5 Decision Framework | §6 Handler Writing | §8 Anti-Patterns |
-| **Facing `#[deprecated]`** | §3 Deprecated Semantics | §5 Decision Framework | §10 Migration Process | Appendix A |
-| **Writing Web handlers** | §6 Handler Writing | §8 Anti-Patterns | §12 Automated Detection | §11 Troubleshooting |
-| **AI/LLM before code generation** | §9 LLM Guidelines | §7 Determinism | §8 Anti-Patterns | §12 Detection |
-| **Doing migration/refactoring** | §10 Migration Process | §3 Deprecated | §12 Detection | §11 Troubleshooting |
-| **Code review** | §8 Anti-Patterns | §3 Deprecated Table | §12 Detection Scripts | All |
+| Your Role                         | Step 1                       | Step 2                | Step 3                  | Optional            |
+| --------------------------------- | ---------------------------- | --------------------- | ----------------------- | ------------------- |
+| **First contact with EvoRule**    | §1 Paradigm Awareness        | §4 JSON Rule Format   | §5 Decision Framework   | §13 Three Maxims    |
+| **Ready to write code**           | §2 Responsibility Boundaries | §5 Decision Framework | §6 Handler Writing      | §8 Anti-Patterns    |
+| **Facing `#[deprecated]`**        | §3 Deprecated Semantics      | §5 Decision Framework | §10 Migration Process   | Appendix A          |
+| **Writing Web handlers**          | §6 Handler Writing           | §8 Anti-Patterns      | §12 Automated Detection | §11 Troubleshooting |
+| **AI/LLM before code generation** | §9 LLM Guidelines            | §7 Determinism        | §8 Anti-Patterns        | §12 Detection       |
+| **Doing migration/refactoring**   | §10 Migration Process        | §3 Deprecated         | §12 Detection           | §11 Troubleshooting |
+| **Code review**                   | §8 Anti-Patterns             | §3 Deprecated Table   | §12 Detection Scripts   | All                 |
 
 ### 0.3 Document Structure
 
@@ -74,13 +74,13 @@ Each such choice systematically erodes EvoRule's constitutional commitments, ult
 
 > "EvoRule is a rule-driven computation platform. **All business logic MUST reside in JSON rules;** Rust code provides only deterministic primitives / the rule engine / I/O channels — the **computational base**."
 
-| Dimension | "JSON-configured Rust framework" (WRONG) | "Rule-driven platform" (RIGHT) |
-|-----------|-----------------------------------------|--------------------------------|
-| Business logic location | Rust function bodies | JSON rule `transform` |
-| Rust's role | Implements business logic | Provides primitives / registers instructions / executes rules |
-| JSON's role | Configures trigger conditions | Expresses complete business logic |
-| Adding new features | Write Rust functions | Write JSON rules |
-| Modifying business logic | Change Rust code | Change JSON rules |
+| Dimension                | "JSON-configured Rust framework" (WRONG) | "Rule-driven platform" (RIGHT)                                |
+| ------------------------ | ---------------------------------------- | ------------------------------------------------------------- |
+| Business logic location  | Rust function bodies                     | JSON rule `transform`                                         |
+| Rust's role              | Implements business logic                | Provides primitives / registers instructions / executes rules |
+| JSON's role              | Configures trigger conditions            | Expresses complete business logic                             |
+| Adding new features      | Write Rust functions                     | Write JSON rules                                              |
+| Modifying business logic | Change Rust code                         | Change JSON rules                                             |
 
 ### 1.2 EvoRule is NOT "Rust first, JSON as fallback"
 
@@ -106,13 +106,13 @@ Why no intermediate state? Because "temporary" becomes "permanent." Every "Rust 
 
 ### 1.4 Core Philosophy (One Sentence)
 
-| Key Concept | Description |
-|-------------|-------------|
-| **Rule-Driven** | Business logic resides in JSON rules, not in code |
-| **JSON Rules** | Rules described in JSON format — readable / verifiable / evolvable |
-| **TCB Minimization** | Core computational base minimized, formally verifiable |
-| **Determinism** | Same rules + same input = same output, pure functions with no side effects |
-| **Transparency** | Rules are self-explanatory; JSON is human-readable |
+| Key Concept          | Description                                                                |
+| -------------------- | -------------------------------------------------------------------------- |
+| **Rule-Driven**      | Business logic resides in JSON rules, not in code                          |
+| **JSON Rules**       | Rules described in JSON format — readable / verifiable / evolvable         |
+| **TCB Minimization** | Core computational base minimized, formally verifiable                     |
+| **Determinism**      | Same rules + same input = same output, pure functions with no side effects |
+| **Transparency**     | Rules are self-explanatory; JSON is human-readable                         |
 
 ---
 
@@ -127,8 +127,6 @@ Python bindings (evorule-py)
 Governance Layer (~6300 lines)
 ↓
 TCB Layer (~3500 lines)
-
-
 
 **Rule**: Upper layers depend on lower layers; lower layers **MUST NEVER** depend on upper layers.
 
@@ -204,15 +202,15 @@ JSON rules carry **all business logic**:
 
 ### 2.5 Absolute Prohibitions (Constitutional Redlines ER-600 to ER-606)
 
-| Redline ID | Prohibited Behavior | Reason |
-|------------|---------------------|--------|
-| **ER-600** | Adding non-deterministic operations to TCB | Same input must produce same output |
-| **ER-601** | Adding LambdaDomain / Callable transform | Breaks transparency and auditability |
+| Redline ID | Prohibited Behavior                                 | Reason                                   |
+| ---------- | --------------------------------------------------- | ---------------------------------------- |
+| **ER-600** | Adding non-deterministic operations to TCB          | Same input must produce same output      |
+| **ER-601** | Adding LambdaDomain / Callable transform            | Breaks transparency and auditability     |
 | **ER-602** | Importing governance or any external crate into TCB | TCB must have zero external dependencies |
-| **ER-603** | Using unsafe code | Ensure memory safety |
-| **ER-604** | Using the `if_else` control-flow primitive | **THIS PRIMITIVE DOES NOT EXIST!** |
-| **ER-605** | Modifying TCB core source files | TCB is the minimized trust base |
-| **ER-606** | Using `$func` in JSON rules | Function references are not supported |
+| **ER-603** | Using unsafe code                                   | Ensure memory safety                     |
+| **ER-604** | Using the `if_else` control-flow primitive          | **THIS PRIMITIVE DOES NOT EXIST!**       |
+| **ER-605** | Modifying TCB core source files                     | TCB is the minimized trust base          |
+| **ER-606** | Using `$func` in JSON rules                         | Function references are not supported    |
 
 ---
 
@@ -236,26 +234,26 @@ Its true meaning is:
 
 > Full list available via `grep -rn "#\[deprecated" crates/governance/src/`. Key mappings below:
 
-| Deprecated Rust Type | Replacement JSON Rule | Trigger Condition |
-|----------------------|------------------------|-------------------|
-| `ForwardChain` | `rules/inference/forward_chain.json` | `__inference__.mode == "forward"` |
-| `BackwardChainer` | `rules/inference/backward_chain.json` | `__inference__.mode == "backward"` |
-| `DimensionChecker` | `rules/inference/dimension_check.json` | `__inference__.dimension_check_requested == true` |
-| `ConvergenceChecker` | `rules/inference/convergence_check.json` | `__inference__.convergence_check_requested == true` |
-| `InformationGainCalculator` | `rules/inference/entropy.json` + `calculate_gain.json` | `__inference__.entropy_requested == true` |
-| `Planner` | `rules/inference/planning_dispatch.json` | `__inference__.planning_requested == true` |
-| `EffectPredictor` | JSON rules + `evaluate_expression` | `__inference__.effect_predict_requested == true` |
-| `CycleDetector` | TCB primitive `detect_cycles` + JSON rules | `__inference__.cycle_detect_requested == true` |
-| `ConflictDetector` | TCB primitive `detect_conflicts` + JSON rules | `__inference__.conflict_detect_requested == true` |
-| `SolverValidator` | `rules/solver/validate_solution.json` | `__solver__.validate_requested == true` |
-| `SelfCheckConfig` | `rules/gate/self_check.json` | `__gate__.self_check_requested == true` |
-| `RedlineChecker` | `rules/constitution/builtin_*.json` | Constitutional rules auto-trigger |
-| `ConstitutionalGate` | `rules/constitution/` full suite | Constitutional rules auto-trigger |
-| `Pipeline` / `PipelineBuilder` | `rules/pipeline/step_definitions.json` | `__pipeline__.run_requested == true` |
-| `ConfigDrivenStrategy` | `rules/universe/select_rules.json` | `__universe__.select_requested == true` |
-| `MetaExecutor` | `rules/meta/execute_meta.json` | `__meta__.execute_requested == true` |
-| `AdaptiveMeta` | `rules/meta/adaptive_cycle.json` | `__meta__.adaptive_cycle_requested == true` |
-| `InjectPruneExecutor` | `rules/meta/action_inject_rule.json` + `action_prune_rule.json` | Corresponding `__meta__.*_requested` |
+| Deprecated Rust Type           | Replacement JSON Rule                                           | Trigger Condition                                   |
+| ------------------------------ | --------------------------------------------------------------- | --------------------------------------------------- |
+| `ForwardChain`                 | `rules/inference/forward_chain.json`                            | `__inference__.mode == "forward"`                   |
+| `BackwardChainer`              | `rules/inference/backward_chain.json`                           | `__inference__.mode == "backward"`                  |
+| `DimensionChecker`             | `rules/inference/dimension_check.json`                          | `__inference__.dimension_check_requested == true`   |
+| `ConvergenceChecker`           | `rules/inference/convergence_check.json`                        | `__inference__.convergence_check_requested == true` |
+| `InformationGainCalculator`    | `rules/inference/entropy.json` + `calculate_gain.json`          | `__inference__.entropy_requested == true`           |
+| `Planner`                      | `rules/inference/planning_dispatch.json`                        | `__inference__.planning_requested == true`          |
+| `EffectPredictor`              | JSON rules + `evaluate_expression`                              | `__inference__.effect_predict_requested == true`    |
+| `CycleDetector`                | TCB primitive `detect_cycles` + JSON rules                      | `__inference__.cycle_detect_requested == true`      |
+| `ConflictDetector`             | TCB primitive `detect_conflicts` + JSON rules                   | `__inference__.conflict_detect_requested == true`   |
+| `SolverValidator`              | `rules/solver/validate_solution.json`                           | `__solver__.validate_requested == true`             |
+| `SelfCheckConfig`              | `rules/gate/self_check.json`                                    | `__gate__.self_check_requested == true`             |
+| `RedlineChecker`               | `rules/constitution/builtin_*.json`                             | Constitutional rules auto-trigger                   |
+| `ConstitutionalGate`           | `rules/constitution/` full suite                                | Constitutional rules auto-trigger                   |
+| `Pipeline` / `PipelineBuilder` | `rules/pipeline/step_definitions.json`                          | `__pipeline__.run_requested == true`                |
+| `ConfigDrivenStrategy`         | `rules/universe/select_rules.json`                              | `__universe__.select_requested == true`             |
+| `MetaExecutor`                 | `rules/meta/execute_meta.json`                                  | `__meta__.execute_requested == true`                |
+| `AdaptiveMeta`                 | `rules/meta/adaptive_cycle.json`                                | `__meta__.adaptive_cycle_requested == true`         |
+| `InjectPruneExecutor`          | `rules/meta/action_inject_rule.json` + `action_prune_rule.json` | Corresponding `__meta__.*_requested`                |
 
 ### 3.3 Correct Invocation Pattern
 
@@ -266,10 +264,11 @@ Its true meaning is:
 let checker = DimensionChecker::new(5);
 let result = checker.check(&rules);
 let passed = result.passed;
-
+```
 
 Correct pattern (driving JSON rules via rule engine):
 
+```rust
 // ✅ Construct State, set trigger flags
 let mut state = State::new();
 state = state.set("__inference__.dimension_check_requested", Value::Bool(true));
@@ -284,11 +283,12 @@ let passed = result.final_state
     .get("__inference__.dimension_result")
     .map(|v| v == "consistent")
     .unwrap_or(false);
-
+```
 
 Key difference: In the incorrect pattern, checker.check() hardcodes "how to check dimensions" inside Rust. In the correct pattern, Rust provides only the loop framework engine.infer(), and "how to check dimensions" is determined by dimension_check.json's transform.
 
-3.4 What if the JSON Rule is Only a Skeleton?
+### 3.4 What if the JSON Rule is Only a Skeleton?
+
 The most common cognitive trap:
 
 "I see dimension_check.json is just a skeleton returning "consistent" / "no_target" strings, with no real checking logic. So I must use the Rust DimensionChecker."
@@ -309,52 +309,64 @@ If the JSON rule's capability is genuinely insufficient to express X (requires n
 
 If X is essentially a deterministic computational primitive (e.g., SHA-256) → It should be provided as a TCB primitive, called by JSON rules.
 
-4. JSON Rule Format (Complete Specification)
+## 4. JSON Rule Format (Complete Specification)
+
 Source: Chapter 2 of LLM_GUIDE + DO_AND_DONT §2/§3/§4 + Chapter 3 of LLM_GUIDE (Error Patterns).
 
-4.1 Rule Structure
+### 4.1 Rule Structure
 
-
+```json
 {
-  "rule_id": "namespace.category.name",
-  "name": "Rule Name",
-  "domain": {
-    /* Matching conditions */
-  },
-  "transform": {
-    /* Execution actions */
-  }
+    "rule_id": "namespace.category.name",
+    "name": "Rule Name",
+    "domain": {
+        // Matching conditions
+    },
+    "transform": {
+        // Execution actions
+    }
 }
+```
 
-4.2 Domain Condition Types
-Type	Description	Example
-atom	Atomic condition	{"type": "atom", "attribute": "x", "op": "eq", "value": 1}
-and	AND condition	{"type": "and", "domains": [...]}
-or	OR condition	{"type": "or", "domains": [...]}
-not	NOT condition	{"type": "not", "domain": {...}}
-universal	Always true	{"type": "universal"}
-empty	Always false	{"type": "empty"}
-4.3 Operator List
-Operator	Aliases	Description
-eq	== / equals	Equal
-ne	!= / not_equals	Not equal
-gt	> / greater_than	Greater than
-ge	>= / greater_equal	Greater or equal
-lt	< / less_than	Less than
-le	<= / less_equal	Less or equal
-contains	has	Contains
-matches	regex	Regex match (RE2 semantics, lock version)
-in	-	In set
-notin	not_in	Not in set
-4.4 Transform Types
-Type	Description	Key Parameters
-instruction_sequence	Sequential instruction execution	instructions
-state_set	Pure assignment	attr / value
-evaluate_domain	Domain evaluation + branching	domain / on_true / on_false
-while_loop	Loop	condition / body / max_steps
+### 4.2 Domain Condition Types
+
+| Type      | Description      | Example                                                      |
+| --------- | ---------------- | ------------------------------------------------------------ |
+| atom      | Atomic condition | `{"type": "atom", "attribute": "x", "op": "eq", "value": 1}` |
+| and       | AND condition    | `{"type": "and", "domains": [...]}`                          |
+| or        | OR condition     | `{"type": "or", "domains": [...]}`                           |
+| not       | NOT condition    | `{"type": "not", "domain": {...}}`                           |
+| universal | Always true      | `{"type": "universal"}`                                      |
+| empty     | Always false     | `{"type": "empty"}`                                          |
+
+### 4.3 Operator List
+
+| Operator | Aliases            | Description                               |
+| -------- | ------------------ | ----------------------------------------- |
+| eq       | == / equals        | Equal                                     |
+| ne       | != / not_equals    | Not equal                                 |
+| gt       | > / greater_than   | Greater than                              |
+| ge       | >= / greater_equal | Greater or equal                          |
+| lt       | < / less_than      | Less than                                 |
+| le       | <= / less_equal    | Less or equal                             |
+| contains | has                | Contains                                  |
+| matches  | regex              | Regex match (RE2 semantics, lock version) |
+| in       | -                  | In set                                    |
+| notin    | not_in             | Not in set                                |
+
+### 4.4 Transform Types
+
+| Type                 | Description                      | Key Parameters               |
+| -------------------- | -------------------------------- | ---------------------------- |
+| instruction_sequence | Sequential instruction execution | instructions                 |
+| state_set            | Pure assignment                  | attr / value                 |
+| evaluate_domain      | Domain evaluation + branching    | domain / on_true / on_false  |
+| while_loop           | Loop                             | condition / body / max_steps |
+
 Prohibited: if_else / for_each / iterate_list / lambda / call / $func / $eval.
 
-4.5 Physical Primitive List (Complete)
+### 4.5 Physical Primitive List (Complete)
+
 state_ops:
 
 state_set — pure assignment: {"type": "state_set", "params": {"attr": "x", "value": 1}}
@@ -387,72 +399,69 @@ trace_step — audit trail step
 Examples: core.instruction.increment / physics.force.gravity / math.equation.solve.
 
 4.7 Priority / Layers
-Layer	Priority Range	Purpose
-Layer 0 (Constitution)	9000-10000	Constitutional rules (immutable)
-Layer 0.5 (Amendments)	8000-8999	Amendment rules
-Layer 1 (Meta-rules)	7000-7999	Meta-rules
-Layer 2 (Business)	0-6999	Ordinary business rules
+Layer Priority Range Purpose
+Layer 0 (Constitution) 9000-10000 Constitutional rules (immutable)
+Layer 0.5 (Amendments) 8000-8999 Amendment rules
+Layer 1 (Meta-rules) 7000-7999 Meta-rules
+Layer 2 (Business) 0-6999 Ordinary business rules
 
 4.8 Minimal Runnable Rule Example
 
 {
-  "rule_id": "example.hello_world",
-  "name": "Hello World",
-  "domain": {
-    "type": "atom",
-    "attribute": "__exec__.instruction.type",
-    "op": "eq",
-    "value": "hello"
-  },
-  "transform": {
-    "type": "instruction_sequence",
-    "params": {
-      "instructions": [
-        {"type": "state_set", "params": {"attr": "message", "value": "Hello, World!"}},
-        {"type": "advance_instruction"}
-      ]
-    }
-  }
+"rule_id": "example.hello_world",
+"name": "Hello World",
+"domain": {
+"type": "atom",
+"attribute": "**exec**.instruction.type",
+"op": "eq",
+"value": "hello"
+},
+"transform": {
+"type": "instruction_sequence",
+"params": {
+"instructions": [
+{"type": "state_set", "params": {"attr": "message", "value": "Hello, World!"}},
+{"type": "advance_instruction"}
+]
+}
+}
 }
 
-
 5. Programming Decision Framework
-Source: Chapter 4 of Doc 31 + §6.1 of Doc 32 (New Feature Decision Tree).
+   Source: Chapter 4 of Doc 31 + §6.1 of Doc 32 (New Feature Decision Tree).
 
 5.1 Decision Tree (When Facing a Choice)
-
 
 【Step 1】Is this "business logic" or "computational primitive"?
 │
 ├─ Business logic (e.g., "how to determine dimension consistency")
-│   │
-│   【Step 2】Does a corresponding JSON rule already exist?
-│   │
-│   ├─ Yes and complete → Use rule engine path (construct State + set trigger flags + call ForwardChain)
-│   │
-│   ├─ Yes but incomplete → Complete the JSON rule (use instruction_sequence + evaluate_domain + while_loop)
-│   │
-│   └─ No → Create new JSON rule (rules/namespace/x.json + domain + transform + result_key + tests)
+│ │
+│ 【Step 2】Does a corresponding JSON rule already exist?
+│ │
+│ ├─ Yes and complete → Use rule engine path (construct State + set trigger flags + call ForwardChain)
+│ │
+│ ├─ Yes but incomplete → Complete the JSON rule (use instruction_sequence + evaluate_domain + while_loop)
+│ │
+│ └─ No → Create new JSON rule (rules/namespace/x.json + domain + transform + result_key + tests)
 │
 └─ Computational primitive (e.g., "SHA-256 hash")
-    │
-    【Step 3】Does the TCB already have this primitive?
-    │
-    ├─ Yes → Reuse primitive
-    │
-    └─ No → Register new primitive
-              ├─ Deterministic computational primitive → Register in TCB layer (requires change review; TCB is frozen)
-              │   ├─ crates/tcb/src/primitive/x_ops.rs
-              │   ├─ Implement exec_x() function
-              │   ├─ Register in mod.rs
-              │   └─ Write unit tests + update §3 mapping table
-              │
-              └─ I/O or high-level operation → Register in Governance layer
-                  ├─ crates/governance/src/primitive/x.rs
-                  ├─ Implement exec_x() function
-                  ├─ Register in mod.rs
-                  └─ Write unit tests + update §3 mapping table
-
+│
+【Step 3】Does the TCB already have this primitive?
+│
+├─ Yes → Reuse primitive
+│
+└─ No → Register new primitive
+├─ Deterministic computational primitive → Register in TCB layer (requires change review; TCB is frozen)
+│ ├─ crates/tcb/src/primitive/x_ops.rs
+│ ├─ Implement exec_x() function
+│ ├─ Register in mod.rs
+│ └─ Write unit tests + update §3 mapping table
+│
+└─ I/O or high-level operation → Register in Governance layer
+├─ crates/governance/src/primitive/x.rs
+├─ Implement exec_x() function
+├─ Register in mod.rs
+└─ Write unit tests + update §3 mapping table
 
 5.2 Five Hard Judgment Rules
 Rule A: Zero-Rust-for-Business-Logic Principle
@@ -500,20 +509,20 @@ Rule E: JSON-Rule-First Completion Principle
 When a JSON rule is only a skeleton, complete the rule first, then use the rule path. NOT ALLOWED to keep using deprecated Rust because "the rule is incomplete."
 
 6. Handler Correctness
-Source: Chapter 5 of Doc 31 + DO_AND_DONT §2.1/§2.2/§2.4.
+   Source: Chapter 5 of Doc 31 + DO_AND_DONT §2.1/§2.2/§2.4.
 
 6.1 Five-Segment Structure
 Every handler MUST strictly follow the five-segment structure:
 
 async fn some_handler(
-    AxumState(state): AxumState<Arc<AppState>>,
-    Path(id): Path<String>,           // 1. Parse input
-    Json(req): Json<RequestBody>,     // 1. Parse input
+AxumState(state): AxumState<Arc<AppState>>,
+Path(id): Path<String>, // 1. Parse input
+Json(req): Json<RequestBody>, // 1. Parse input
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ErrorResponse>)> {
-    // 2. Construct State, set trigger flags
-    let mut state = State::new();
-    state = state.set("__namespace__.action_requested", Value::Bool(true));
-    state = state.set("__namespace__.input", req.into_value());
+// 2. Construct State, set trigger flags
+let mut state = State::new();
+state = state.set("**namespace**.action_requested", Value::Bool(true));
+state = state.set("**namespace**.input", req.into_value());
 
     // 3. Call rule engine
     let engine = ForwardChain::new(state.config.max_steps);
@@ -527,8 +536,8 @@ async fn some_handler(
 
     // 5. Serialize output
     Ok(Json(json!({ "result": response_data })))
-}
 
+}
 
 6.2 Handler Prohibited List
 Handlers are FORBIDDEN to contain:
@@ -599,7 +608,7 @@ The incorrect flow is:
 ❌ Add new methods to deprecated Rust types.
 
 7. Determinism Constitutional Engineering
-Source: Chapter 6 of Doc 31 + DO_AND_DONT §1 + LLM_GUIDE §1.3.
+   Source: Chapter 6 of Doc 31 + DO_AND_DONT §1 + LLM_GUIDE §1.3.
 
 7.1 Determinism is NOT "try your best", it's "MUST achieve"
 EvoRule's core commitment:
@@ -619,15 +628,15 @@ Errors are localizable
 Any code that breaks determinism effectively degrades EvoRule to an ordinary rule engine.
 
 7.2 Non-Deterministic API Alternatives
-Forbidden API	Use Case	Alternative
-SystemTime::now()	Get current time	LogicalClock::current_tick() / __temporal__.tick
-Instant::now()	Measure duration	Should not measure duration in business logic (performance monitoring belongs to Governance infrastructure)
-Uuid::new_v4()	Generate unique ID	content_hash(&content)
-rand::random()	Generate random numbers	DeterministicRNG::from_seed(seed)
-thread_rng()	Thread RNG	DeterministicRNG::from_seed(seed)
-process::id()	Get process ID	Should not be used as logical input
-env::var() direct	Read environment variables	Snapshot at startup into State.__env__; business logic reads via state_set + $ref
-File mtime	File modification time	Use content_hash to detect content changes
+Forbidden API Use Case Alternative
+SystemTime::now() Get current time LogicalClock::current_tick() / **temporal**.tick
+Instant::now() Measure duration Should not measure duration in business logic (performance monitoring belongs to Governance infrastructure)
+Uuid::new_v4() Generate unique ID content_hash(&content)
+rand::random() Generate random numbers DeterministicRNG::from_seed(seed)
+thread_rng() Thread RNG DeterministicRNG::from_seed(seed)
+process::id() Get process ID Should not be used as logical input
+env::var() direct Read environment variables Snapshot at startup into State.**env**; business logic reads via state_set + $ref
+File mtime File modification time Use content_hash to detect content changes
 7.3 Determinism Boundary
 The determinism boundary refers to operations that "appear non-deterministic but are actually controllable":
 
@@ -637,9 +646,9 @@ Environment variables: May differ across processes, but within the same process 
 
 Handling method:
 
-I/O results stored in State.__io__.snapshot; business logic reads only the snapshot.
+I/O results stored in State.**io**.snapshot; business logic reads only the snapshot.
 
-Environment variables snapshotted at startup into State.__env__; business logic reads only the snapshot.
+Environment variables snapshotted at startup into State.**env**; business logic reads only the snapshot.
 
 Audit chain records I/O call input parameters and output hashes, ensuring replayability.
 
@@ -746,16 +755,16 @@ fn fast_check_all_rules(rules: &HashMap<String, Rule>) -> Vec<Issue> {
 
 ### 8.5 Anti-Pattern 5: Using non-existent primitives (Quick Reference)
 
-| Scenario | Incorrect ❌ | Correct ✅ |
-|----------|-------------|------------|
-| Conditional branch | Use `if_else` | Use `evaluate_domain` + `on_true`/`on_false` |
-| Loop | Use `for_each` | Use `while_loop` + `max_steps` |
-| List iteration | Use `iterate_list` | Use `while_loop` + `get_index` |
-| Function return value | Use `$func` | Use concrete value or `$ref` |
-| Time retrieval | Use `now()` | Use `__temporal__.state.timestamp` |
-| Random numbers | Use `rand()` | Not supported (determinism required) |
-| File reading | Use `std::fs` | Via `io_read` primitive |
-| External API | Direct HTTP call | Via Governance layer I/O |
+| Scenario              | Incorrect ❌       | Correct ✅                                   |
+| --------------------- | ------------------ | -------------------------------------------- |
+| Conditional branch    | Use `if_else`      | Use `evaluate_domain` + `on_true`/`on_false` |
+| Loop                  | Use `for_each`     | Use `while_loop` + `max_steps`               |
+| List iteration        | Use `iterate_list` | Use `while_loop` + `get_index`               |
+| Function return value | Use `$func`        | Use concrete value or `$ref`                 |
+| Time retrieval        | Use `now()`        | Use `__temporal__.state.timestamp`           |
+| Random numbers        | Use `rand()`       | Not supported (determinism required)         |
+| File reading          | Use `std::fs`      | Via `io_read` primitive                      |
+| External API          | Direct HTTP call   | Via Governance layer I/O                     |
 
 ### 8.6 Anti-Pattern 6: Using Lambda / Callable / Dynamic Code in JSON
 
@@ -915,12 +924,12 @@ Each P step: Assess → Complete rules → Migrate call sites → Remove old cod
 
 ### 11.1 Common Error Messages
 
-| Error Message | Cause | Solution |
-|---------------|-------|----------|
-| `Unknown instruction type: if_else` | Used non-existent primitive | Use `evaluate_domain` instead |
-| `Failed to parse domain` | Domain format error | Check JSON structure (§4.2) |
-| `Circular dependency detected` | Rules have circular dependencies | Check rule dependency graph |
-| `Non-deterministic operation` | Attempted non-deterministic operation | Remove randomness or time dependence, use §7.2 alternatives |
+| Error Message                       | Cause                                 | Solution                                                    |
+| ----------------------------------- | ------------------------------------- | ----------------------------------------------------------- |
+| `Unknown instruction type: if_else` | Used non-existent primitive           | Use `evaluate_domain` instead                               |
+| `Failed to parse domain`            | Domain format error                   | Check JSON structure (§4.2)                                 |
+| `Circular dependency detected`      | Rules have circular dependencies      | Check rule dependency graph                                 |
+| `Non-deterministic operation`       | Attempted non-deterministic operation | Remove randomness or time dependence, use §7.2 alternatives |
 
 ### 11.2 Debugging Techniques
 
@@ -940,11 +949,11 @@ Each P step: Assess → Complete rules → Migrate call sites → Remove old cod
 
 ### 12.1 Three-Layer Detection System
 
-| Layer | Method | Use Case | Tool/Script |
-|-------|--------|----------|-------------|
-| **L1 Static Scan** | grep / Select-String | Pre-commit quick check | Appendix C.1 (ps1/bash) |
-| **L2 Automated Tool** | Cargo tool | CI integration | Appendix C.2 (Rust) |
-| **L3 Compiler Warnings** | `#[deprecated]` + clippy | Compile-time interception | Appendix C.3 |
+| Layer                    | Method                   | Use Case                  | Tool/Script             |
+| ------------------------ | ------------------------ | ------------------------- | ----------------------- |
+| **L1 Static Scan**       | grep / Select-String     | Pre-commit quick check    | Appendix C.1 (ps1/bash) |
+| **L2 Automated Tool**    | Cargo tool               | CI integration            | Appendix C.2 (Rust)     |
+| **L3 Compiler Warnings** | `#[deprecated]` + clippy | Compile-time interception | Appendix C.3            |
 
 ### 12.2 Detection Dimensions (Aligned with §3 Mapping Table)
 
@@ -1004,20 +1013,23 @@ Each P step: Assess → Complete rules → Migrate call sites → Remove old cod
 ## V-01 Tracking (deprecated types)
 
 ### DimensionChecker::new()
+
 - Status: Pending migration
 - Call sites:
-  - crates/governance/src/handlers/dimension.rs:42
-  - crates/science_platform/src/handlers/dimension.rs:18
+    - crates/governance/src/handlers/dimension.rs:42
+    - crates/science_platform/src/handlers/dimension.rs:18
 - Plan: Migrate to rules/inference/dimension_check.json
 - Owner: @xxx
 - Deadline: 2026-xx-xx
 
 ### BackwardChainer::new()
+
 - Status: ...
 
 ## V-03 Tracking (non-deterministic APIs)
 
 ### SystemTime::now()
+
 - Status: ...
 ```
 
@@ -1085,21 +1097,21 @@ You need to write some code...
 
 > **Source**: Appendix B of Doc 31 + DO_AND_DONT implicit terminology.
 
-| Term | Definition |
-|------|------------|
-| **TCB** | Trusted Computing Base — EvoRule's trust foundation |
-| **Governance** | Governance layer — provides rule management / I/O channels / high-level execution engines |
-| **Rule-Driven** | Business logic expressed in JSON rules, executed by the rule engine |
-| **Determinism** | Same input forever produces same output |
-| **LogicalClock** | Logical clock — deterministic timestamp replacing wall-clock time |
-| **content_hash** | Content hash — generates deterministic IDs based on content |
-| **deprecated** | In EvoRule, specifically means "business logic has migrated to JSON rules" |
-| **Primitive** | Minimum computational unit provided by TCB (state_set / evaluate_domain / etc.) |
-| **Trigger Flag** | Boolean field in State used to trigger JSON rules (e.g., `__inference__.forward_chain_requested`) |
-| **Result Key** | Field in State storing rule execution results (e.g., `__inference__.result`) |
-| **Constitutional Redline** | Inviolable architecture constraints (ER-600 to ER-606) |
-| **Paradigm Misalignment** | Writing EvoRule code with traditional programming habits, violating rule-driven architecture |
-| **Skeleton** | JSON rule transform empty or returns only constant strings — business logic not implemented |
+| Term                       | Definition                                                                                        |
+| -------------------------- | ------------------------------------------------------------------------------------------------- |
+| **TCB**                    | Trusted Computing Base — EvoRule's trust foundation                                               |
+| **Governance**             | Governance layer — provides rule management / I/O channels / high-level execution engines         |
+| **Rule-Driven**            | Business logic expressed in JSON rules, executed by the rule engine                               |
+| **Determinism**            | Same input forever produces same output                                                           |
+| **LogicalClock**           | Logical clock — deterministic timestamp replacing wall-clock time                                 |
+| **content_hash**           | Content hash — generates deterministic IDs based on content                                       |
+| **deprecated**             | In EvoRule, specifically means "business logic has migrated to JSON rules"                        |
+| **Primitive**              | Minimum computational unit provided by TCB (state_set / evaluate_domain / etc.)                   |
+| **Trigger Flag**           | Boolean field in State used to trigger JSON rules (e.g., `__inference__.forward_chain_requested`) |
+| **Result Key**             | Field in State storing rule execution results (e.g., `__inference__.result`)                      |
+| **Constitutional Redline** | Inviolable architecture constraints (ER-600 to ER-606)                                            |
+| **Paradigm Misalignment**  | Writing EvoRule code with traditional programming habits, violating rule-driven architecture      |
+| **Skeleton**               | JSON rule transform empty or returns only constant strings — business logic not implemented       |
 
 ---
 
@@ -1418,25 +1430,25 @@ pub struct DimensionChecker { ... }
 
 ## Appendix D: Source Document Cross-Reference
 
-| This Document Section | Source Document |
-|-----------------------|-----------------|
-| §1 Paradigm Awareness | Chapter 1 of Doc 31 + LLM_GUIDE §1.1 + DO_AND_DONT implicit principles |
+| This Document Section        | Source Document                                                        |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| §1 Paradigm Awareness        | Chapter 1 of Doc 31 + LLM_GUIDE §1.1 + DO_AND_DONT implicit principles |
 | §2 Responsibility Boundaries | Chapter 2 of Doc 31 + DO_AND_DONT §5 + LLM_GUIDE §4.3 + LLM_GUIDE §1.2 |
-| §3 Deprecated | Chapter 3 of Doc 31 + Chapter 2 of Doc 32 (Violation Classification) |
-| §4 JSON Rule Format | Chapter 2 of LLM_GUIDE + DO_AND_DONT §2/§3/§4 |
-| §5 Decision Framework | Chapter 4 of Doc 31 + §6.1 of Doc 32 |
-| §6 Handler | Chapter 5 of Doc 31 + DO_AND_DONT §2.1/§2.2 |
-| §7 Determinism | Chapter 6 of Doc 31 + DO_AND_DONT §1 + LLM_GUIDE §1.3 |
-| §8 Anti-Patterns | §4.3 of Doc 31 + DO_AND_DONT §4 + Chapter 3 of LLM_GUIDE |
-| §9 LLM Guidelines | Chapter 7 of Doc 31 + LLM_GUIDE §1.3/Chapter 3 |
-| §10 Migration | Chapter 8 of Doc 31 + Chapter 4 of Doc 32 |
-| §11 Troubleshooting | Chapter 5 of LLM_GUIDE |
-| §12 Automated Detection | DO_AND_DONT §6 + Chapters 3/5 of Doc 32 |
-| §13 Three Maxims | Chapter 10 of Doc 31 |
-| Appendix A Flowchart | Appendix A of Doc 31 |
-| Appendix B Glossary | Appendix B of Doc 31 + DO_AND_DONT |
-| Appendix C Scripts | Chapter 3 of Doc 32 |
-| Appendix D Cross-Reference | This merge's traceability |
+| §3 Deprecated                | Chapter 3 of Doc 31 + Chapter 2 of Doc 32 (Violation Classification)   |
+| §4 JSON Rule Format          | Chapter 2 of LLM_GUIDE + DO_AND_DONT §2/§3/§4                          |
+| §5 Decision Framework        | Chapter 4 of Doc 31 + §6.1 of Doc 32                                   |
+| §6 Handler                   | Chapter 5 of Doc 31 + DO_AND_DONT §2.1/§2.2                            |
+| §7 Determinism               | Chapter 6 of Doc 31 + DO_AND_DONT §1 + LLM_GUIDE §1.3                  |
+| §8 Anti-Patterns             | §4.3 of Doc 31 + DO_AND_DONT §4 + Chapter 3 of LLM_GUIDE               |
+| §9 LLM Guidelines            | Chapter 7 of Doc 31 + LLM_GUIDE §1.3/Chapter 3                         |
+| §10 Migration                | Chapter 8 of Doc 31 + Chapter 4 of Doc 32                              |
+| §11 Troubleshooting          | Chapter 5 of LLM_GUIDE                                                 |
+| §12 Automated Detection      | DO_AND_DONT §6 + Chapters 3/5 of Doc 32                                |
+| §13 Three Maxims             | Chapter 10 of Doc 31                                                   |
+| Appendix A Flowchart         | Appendix A of Doc 31                                                   |
+| Appendix B Glossary          | Appendix B of Doc 31 + DO_AND_DONT                                     |
+| Appendix C Scripts           | Chapter 3 of Doc 32                                                    |
+| Appendix D Cross-Reference   | This merge's traceability                                              |
 
 ---
 
@@ -1444,6 +1456,6 @@ pub struct DimensionChecker { ... }
 
 > This specification will be continuously updated as EvoRule evolves and real-world lessons accumulate. Every rework should prompt reflection: "Could this rework have been avoided by a rule in this document?" If yes, please add it to the corresponding section.
 
-
 ```
 
+```

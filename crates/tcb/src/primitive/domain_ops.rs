@@ -72,6 +72,7 @@
 use crate::control::dispatch::resolve_path;
 use crate::domain::Domain;
 use crate::error::{missing_param, EvoRuleError};
+use crate::exec_ctl_ctx::ExecCtlCtx;
 use crate::instruction::registry::InstructionRegistry;
 use crate::rule::GenericInstruction;
 use crate::state::State;
@@ -120,6 +121,7 @@ pub(crate) fn exec_evaluate_domain(
     reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let domain_val = instruction
         .params
@@ -233,6 +235,7 @@ pub(crate) fn exec_match_domain(
     _reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let domain_raw = instruction
         .params
@@ -262,7 +265,7 @@ pub(crate) fn exec_match_domain(
         .and_then(|v| v.as_str().map(std::string::ToString::to_string))
         .unwrap_or_else(|| "__matched__".to_string());
 
-    Ok(state.set_path(&store_as, Value::Bool(matched)))
+    state.set_path(&store_as, Value::Bool(matched))
 }
 
 /// Domain intersection — determines whether two domain trees *may* have a
@@ -313,6 +316,7 @@ pub(crate) fn exec_domain_intersect(
     _reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let d1_raw = instruction
         .params
@@ -333,7 +337,7 @@ pub(crate) fn exec_domain_intersect(
         .ok_or_else(|| missing_param("domain_intersect", "result_attr"))?;
 
     let intersects = domain_values_overlap(&d1, &d2);
-    Ok(state.set_path(&result_attr, Value::Bool(intersects)))
+    state.set_path(&result_attr, Value::Bool(intersects))
 }
 
 /// Recursive check whether two domain Value trees may overlap.
@@ -433,6 +437,7 @@ mod tests {
     #[test]
     fn test_evaluate_domain() {
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(10))]);
 
         let domain = Value::from(im::HashMap::from(vec![
@@ -446,13 +451,14 @@ mod tests {
         params.insert("domain".to_string(), domain);
         let instr = GenericInstruction::new("evaluate_domain", params);
 
-        let result = exec_evaluate_domain(&reg, &state, &instr).unwrap();
+        let result = exec_evaluate_domain(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("__domain_result__"), Some(&Value::Bool(true)));
     }
 
     #[test]
     fn test_match_domain_true() {
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(42))]);
 
         let domain = Value::from(im::HashMap::from(vec![
@@ -466,7 +472,7 @@ mod tests {
         params.insert("domain".to_string(), domain);
         let instr = GenericInstruction::new("match_domain", params);
 
-        let result = exec_match_domain(&reg, &state, &instr).unwrap();
+        let result = exec_match_domain(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("__matched__"), Some(&Value::Bool(true)));
     }
 
@@ -478,6 +484,7 @@ mod tests {
     #[test]
     fn test_evaluate_domain_false_selects_else_branch() {
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(10))]);
 
         let domain = Value::from(im::hashmap! {
@@ -500,7 +507,7 @@ mod tests {
         params.insert("on_false".to_string(), on_false);
         let instr = GenericInstruction::new("evaluate_domain", params);
 
-        let result = exec_evaluate_domain(&reg, &state, &instr).unwrap();
+        let result = exec_evaluate_domain(&reg, &state, &instr, &mut ctx).unwrap();
 
         // Verify __domain_result__ is false
         assert_eq!(result.get("__domain_result__"), Some(&Value::Bool(false)));
@@ -519,6 +526,7 @@ mod tests {
     #[test]
     fn test_evaluate_domain_true_selects_then_branch() {
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(10))]);
 
         let domain = Value::from(im::hashmap! {
@@ -541,7 +549,7 @@ mod tests {
         params.insert("on_false".to_string(), on_false);
         let instr = GenericInstruction::new("evaluate_domain", params);
 
-        let result = exec_evaluate_domain(&reg, &state, &instr).unwrap();
+        let result = exec_evaluate_domain(&reg, &state, &instr, &mut ctx).unwrap();
 
         // Verify __domain_result__ is true
         assert_eq!(result.get("__domain_result__"), Some(&Value::Bool(true)));
@@ -560,6 +568,7 @@ mod tests {
     #[test]
     fn test_evaluate_domain_no_branch_no_error() {
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(10))]);
 
         let domain = Value::from(im::hashmap! {
@@ -575,7 +584,7 @@ mod tests {
         let instr = GenericInstruction::new("evaluate_domain", params);
 
         // Should not error, only return __domain_result__
-        let result = exec_evaluate_domain(&reg, &state, &instr).unwrap();
+        let result = exec_evaluate_domain(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("__domain_result__"), Some(&Value::Bool(true)));
     }
 
@@ -583,6 +592,7 @@ mod tests {
     #[test]
     fn test_match_domain_false() {
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(10))]);
 
         let domain = Value::from(im::hashmap! {
@@ -596,7 +606,7 @@ mod tests {
         params.insert("domain".to_string(), domain);
         let instr = GenericInstruction::new("match_domain", params);
 
-        let result = exec_match_domain(&reg, &state, &instr).unwrap();
+        let result = exec_match_domain(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("__matched__"), Some(&Value::Bool(false)));
     }
 
@@ -604,6 +614,7 @@ mod tests {
     #[test]
     fn test_match_domain_nested_path() {
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         // Create nested structure: { outer: { inner: 42 } }
         let state = State::new(vec![(
             "outer",
@@ -624,7 +635,7 @@ mod tests {
         params.insert("domain".to_string(), domain);
         let instr = GenericInstruction::new("match_domain", params);
 
-        let result = exec_match_domain(&reg, &state, &instr).unwrap();
+        let result = exec_match_domain(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("__matched__"), Some(&Value::Bool(true)));
     }
 
@@ -632,6 +643,7 @@ mod tests {
     #[test]
     fn test_match_domain_state_ref() {
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(10))]);
 
         // Create external state data
@@ -651,7 +663,7 @@ mod tests {
         params.insert("state_ref".to_string(), external_state);
         let instr = GenericInstruction::new("match_domain", params);
 
-        let result = exec_match_domain(&reg, &state, &instr).unwrap();
+        let result = exec_match_domain(&reg, &state, &instr, &mut ctx).unwrap();
         // External state has x=99, domain checks x=99, so it matches
         assert_eq!(result.get("__matched__"), Some(&Value::Bool(true)));
     }
@@ -660,6 +672,7 @@ mod tests {
     #[test]
     fn test_match_domain_custom_result_attr() {
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(42))]);
 
         let domain = Value::from(im::hashmap! {
@@ -674,7 +687,7 @@ mod tests {
         params.insert("result_attr".to_string(), Value::string("my_match_result"));
         let instr = GenericInstruction::new("match_domain", params);
 
-        let result = exec_match_domain(&reg, &state, &instr).unwrap();
+        let result = exec_match_domain(&reg, &state, &instr, &mut ctx).unwrap();
         // Using custom result_attr
         assert_eq!(result.get("my_match_result"), Some(&Value::Bool(true)));
         // Default __matched__ does not exist
@@ -696,13 +709,14 @@ mod tests {
 
     fn run_domain_intersect(d1: Value, d2: Value) -> State {
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![]);
         let mut params = HashMap::new();
         params.insert("domain1".to_string(), d1);
         params.insert("domain2".to_string(), d2);
         params.insert("result_attr".to_string(), Value::string("_overlap"));
         let instr = GenericInstruction::new("domain_intersect", params);
-        exec_domain_intersect(&reg, &state, &instr).unwrap()
+        exec_domain_intersect(&reg, &state, &instr, &mut ctx).unwrap()
     }
 
     #[test]
@@ -822,13 +836,14 @@ mod tests {
     #[test]
     fn test_domain_intersect_missing_params_errors() {
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![]);
         // Missing domain2.
         let mut params = HashMap::new();
         params.insert("domain1".to_string(), atom_domain("x", "eq", 1));
         params.insert("result_attr".to_string(), Value::string("_o"));
         let instr = GenericInstruction::new("domain_intersect", params);
-        let err = exec_domain_intersect(&reg, &state, &instr).unwrap_err();
+        let err = exec_domain_intersect(&reg, &state, &instr, &mut ctx).unwrap_err();
         assert!(err.to_string().contains("domain2"));
     }
 
@@ -836,6 +851,7 @@ mod tests {
     #[test]
     fn test_evaluate_domain_not() {
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(10))]);
 
         // NOT (x == 99) -> true, because x=10 is not equal to 99
@@ -853,7 +869,7 @@ mod tests {
         params.insert("domain".to_string(), domain);
         let instr = GenericInstruction::new("evaluate_domain", params);
 
-        let result = exec_evaluate_domain(&reg, &state, &instr).unwrap();
+        let result = exec_evaluate_domain(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("__domain_result__"), Some(&Value::Bool(true)));
     }
 
@@ -861,6 +877,7 @@ mod tests {
     #[test]
     fn test_evaluate_domain_and() {
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(10)), ("y", Value::Integer(20))]);
 
         // x == 10 AND y == 20 -> true
@@ -886,7 +903,7 @@ mod tests {
         params.insert("domain".to_string(), domain);
         let instr = GenericInstruction::new("evaluate_domain", params);
 
-        let result = exec_evaluate_domain(&reg, &state, &instr).unwrap();
+        let result = exec_evaluate_domain(&reg, &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("__domain_result__"), Some(&Value::Bool(true)));
     }
 
@@ -898,10 +915,11 @@ mod tests {
     fn test_evaluate_domain_missing_domain_param_returns_err() {
         // Missing "domain" param → should return Err(MissingParam)
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(10))]);
         let instr = GenericInstruction::new("evaluate_domain", HashMap::new());
 
-        let result = exec_evaluate_domain(&reg, &state, &instr);
+        let result = exec_evaluate_domain(&reg, &state, &instr, &mut ctx);
         assert!(result.is_err(), "missing domain param should return Err");
         let err = result.unwrap_err();
         match err {
@@ -916,12 +934,13 @@ mod tests {
     fn test_evaluate_domain_non_object_domain_returns_err() {
         // domain is a non-Object value (Integer) → Domain::from_value should fail
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(10))]);
         let mut params = HashMap::new();
         params.insert("domain".to_string(), Value::Integer(42));
         let instr = GenericInstruction::new("evaluate_domain", params);
 
-        let result = exec_evaluate_domain(&reg, &state, &instr);
+        let result = exec_evaluate_domain(&reg, &state, &instr, &mut ctx);
         assert!(
             result.is_err(),
             "non-Object domain should return Err from Domain::from_value"
@@ -932,6 +951,7 @@ mod tests {
     fn test_evaluate_domain_invalid_domain_type_returns_err() {
         // domain has unknown "type" → Domain::from_value should fail
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(10))]);
         let domain = Value::from(im::hashmap! {
             "type".to_string() => Value::string("unknown_type"),
@@ -940,7 +960,7 @@ mod tests {
         params.insert("domain".to_string(), domain);
         let instr = GenericInstruction::new("evaluate_domain", params);
 
-        let result = exec_evaluate_domain(&reg, &state, &instr);
+        let result = exec_evaluate_domain(&reg, &state, &instr, &mut ctx);
         assert!(result.is_err(), "invalid domain type should return Err");
     }
 
@@ -948,10 +968,11 @@ mod tests {
     fn test_match_domain_missing_domain_param_returns_err() {
         // Missing "domain" param → should return Err(MissingParam)
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(10))]);
         let instr = GenericInstruction::new("match_domain", HashMap::new());
 
-        let result = exec_match_domain(&reg, &state, &instr);
+        let result = exec_match_domain(&reg, &state, &instr, &mut ctx);
         assert!(result.is_err(), "missing domain param should return Err");
         let err = result.unwrap_err();
         match err {
@@ -966,6 +987,7 @@ mod tests {
     fn test_match_domain_non_object_domain_returns_err() {
         // domain is a non-Object value (List) → Domain::from_value should fail
         let reg = InstructionRegistry::new();
+        let mut ctx = ExecCtlCtx::new();
         let state = State::new(vec![("x", Value::Integer(10))]);
         let mut params = HashMap::new();
         params.insert(
@@ -974,7 +996,7 @@ mod tests {
         );
         let instr = GenericInstruction::new("match_domain", params);
 
-        let result = exec_match_domain(&reg, &state, &instr);
+        let result = exec_match_domain(&reg, &state, &instr, &mut ctx);
         assert!(
             result.is_err(),
             "non-Object domain should return Err from Domain::from_value"

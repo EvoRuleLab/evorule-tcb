@@ -44,14 +44,23 @@ pub mod registry;
 /// - `&registry::InstructionRegistry`: The registry instance (for recursive execution)
 /// - `&crate::state::State`: The immutable input state
 /// - `&crate::rule::GenericInstruction`: The instruction to execute
+/// - `&mut crate::exec_ctl_ctx::ExecCtlCtx`: Execution control context (depth, tick, budget)
 ///
 /// # Returns
 /// - `Ok(crate::state::State)`: The new state after execution
 /// - `Err(crate::error::EvoRuleError)`: An execution error
+///
+/// # Migration Notes
+///
+/// This signature was updated as part of Phase 1 (pure function transformation)
+/// to include `ExecCtlCtx`. The previous signature (without `ExecCtlCtx`) used
+/// `Cell<usize>` for depth tracking, which broke purity. The new signature makes
+/// all execution functions true pure functions.
 pub type ExecutorFn = fn(
     &registry::InstructionRegistry,
     &crate::state::State,
     &crate::rule::GenericInstruction,
+    &mut crate::exec_ctl_ctx::ExecCtlCtx,
 ) -> Result<crate::state::State, crate::error::EvoRuleError>;
 
 /// Executor result type.

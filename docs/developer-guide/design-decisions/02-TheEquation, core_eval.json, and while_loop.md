@@ -169,4 +169,66 @@ Microcode layer	core_eval.json	Defines instruction‑set orchestration logic
 Program layer	Upper JSON rules	Expresses business logic using the instruction set
 Each layer depends only on the layer below, never upward. This enables independent evolution, independent auditing, and independent verification for each layer. This is the physical implementation of EvoRule's "rule‑driven everything" philosophy at the engineering level.
 
+---
+
+## 7. Architecture Update (v1.1, 2026-07-05) — Constitutional Dispatch
+
+> **Scope of this update**: The above analysis (§1–§6) describes the **v1.0 architecture**, where the cases table lives in `core_eval.json` and is read by `dispatch` at runtime. Starting 2026-07-05, the cases table is **no longer stored in JSON**. It is **built dynamically** by `governance-core`'s `DispatchTableBuilder` at startup, then injected into `__exec__`. This update describes what changed in v1.1 and why.
+
+### 7.1 What changed
+
+| Concern | v1.0 | v1.1 |
+|---------|------|------|
+| Cases-table source | Hardcoded in `core_eval.json` (~660 lines, 40+ case entries) | **Built at startup** by `DispatchTableBuilder` from the `InstructionRegistry` + `register_core_aliases()` + `set_default()` (core_eval.json shrinks to ~30 lines skeleton) |
+| Cases-table injection | Direct field in `core_eval.json` → read by `dispatch` | `governance-core::Equation::build_dispatch_table()` produces `(dispatch_cases, dispatch_default, dispatch_table_version)`; injected into `__exec__` by `evaluate()` |
+| TCB-side dispatch | `dispatch` reads `__exec__.dispatch_cases` only | `control/dispatch.rs` **dual-source reading** (ER-605 Exception #1): `contains_key("cases")` in `instruction.params` distinguishes main dispatch (read from `__exec__.dispatch_cases`) vs sub-dispatch (read from `instruction.params.cases`) |
+| Audit traceability | `trace_step` records state change only | `primitive/audit_ops.rs` **appends `[tbl:<hash>]`** to `change_summary` (ER-605 Exception #2); `dispatch_table_version` = SHA-256 of `(cases + default)` |
+| Governance modules | Monolithic `equation.rs` (~1900 LOC) | Split: `equation.rs` (orchestration) + `engine/dispatch_table.rs` (new, ~140 LOC) + `engine/aliases.rs` (new, ~120 LOC) |
+| Adding a new physical primitive | Edit `core_eval.json` cases table + register in Rust | **Just register in Rust** — `auto_from_registry()` auto-generates the case (zero JSON change) |
+| Adding a new business alias | Edit `core_eval.json` cases table | Edit `aliases.rs::register_core_aliases()` (JSON never touched) |
+
+### 7.2 Why the change
+
+The v1.0 architecture had a **single source of duplication**: every physical primitive registered in Rust needed a matching entry in `core_eval.json` cases table. This caused:
+
+1. **Maintenance burden**: every Rust `register_*()` call required a paired JSON edit. Bugs at the seam (typo in JSON, drift from Rust) were caught only by `validate_strict()` at startup.
+2. **Bloating**: `core_eval.json` grew linearly with primitive count; the "constitution" file was no longer constitutional, just a giant lookup table.
+3. **No version traceability**: when a case's behavior changed, there was no audit record of "this instruction was dispatched against cases-table version X".
+
+The v1.1 architecture addresses all three:
+
+- **Single source of truth** = `InstructionRegistry` (Rust). Cases table becomes a *projection* of the registry, not a parallel artifact.
+- **Constitutional file** = `core_eval.json` shrinks to ~30 lines (just `rule_id` + `transform` skeleton). It stops growing.
+- **Audit traceability** = `dispatch_table_version` (content hash) is appended to every `trace_step`. The audit chain now records *which version of the dispatch table* was active when each instruction executed.
+
+### 7.3 What stays the same
+
+The synergy model from §1–§6 still holds:
+
+- **TheEquation** still does initialization + one `reg.execute(core.eval)` call.
+- **while_loop** still self-drives via JSON body `[dispatch, trace_step, …]`.
+- **core_eval.json** is still the constitutional file (now with a *much smaller* constitution).
+- The three-layer separation (Physical / Microcode / Program) is preserved.
+
+### 7.4 Where to look in source
+
+- **TCB-side changes** (in `evorule-tcb`):
+  - `crates/tcb/src/control/dispatch.rs` — dual-source reading (ER-605 Exception #1).
+  - `crates/tcb/src/primitive/audit_ops.rs` — `[tbl:<hash>]` appending (ER-605 Exception #2).
+  - `crates/tcb/src/audit.rs`, `primitive/error_ops.rs`, `primitive/rule_ops.rs` — supporting changes for dispatch-table validation errors and rule-fixture alignment.
+- **Governance-side changes** (in `evorule-governance`):
+  - `crates/governance-core/src/engine/equation.rs` — `extract_cases_table()` deleted; `build_dispatch_table()` added.
+  - `crates/governance-core/src/engine/dispatch_table.rs` (new) — `DispatchTableBuilder` (categories A/E).
+  - `crates/governance-core/src/engine/aliases.rs` (new) — `register_core_aliases()` (categories B/C/D).
+  - `crates/governance-core/src/engine/core_eval.json` — shrunk from ~660 → ~30 lines.
+  - `crates/governance-core/src/engine/eval_config.json` — `primitives` section deleted (now derived from registry).
+
+### 7.5 Cross-references
+
+- **Full architectural specification**: see [`docs/spec/en-US/TCB_Governance_Contract.md`](../spec/en-US/TCB_Governance_Contract.md) for the TCB-side contract (governance boundary, ER-605 exceptions #1/#2, dispatch-table versioning, audit-chain fields).
+- **Audit / determinism**: see [`docs/spec/en-US/EvoRule_Determinism_Standard.md`](../spec/en-US/EvoRule_Determinism_Standard.md) §5.5 for the `[tbl:<hash>]` audit-record format and the L1-L4 determinism boundary.
+- **Forbidden-rules contract**: see [`docs/gate/FORBIDDEN_OVERVIEW.md`](../gate/FORBIDDEN_OVERVIEW.md) for the full GG-01..GG-25 governance-side forbidden-rules table (mirrored from `evorule-governance/docs/gate/GATES.md`).
+
+---
+
 End of Document

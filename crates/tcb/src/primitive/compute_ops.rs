@@ -19,25 +19,13 @@
 //! # Core Functions
 //!
 //! - `content_hash`: Content hash computation (SHA-256, deterministic).
-//! - `format_string`: Template string replacement with `{key}` placeholders.
 //! - `get_index`: List index access (supports negative indices).
+//! - `object_keys`: Extract sorted keys from an object.
+//! - `set_intersection`: Compute intersection of two string lists.
+//! - `set_diff`: Compute set difference (list_a minus list_b).
+//! - `set_union`: Compute union of two string lists.
 //!
 //! # Design Principles
-//!
-//! ## `format_string`: Strict Preservation Redline
-//!
-//! Only `Value::String` typed values are substituted. For any other case:
-//! - Non-String value types (Integer, Bool, Float, List, Object)
-//! - Missing keys
-//! - `Value::Null`
-//!
-//! The **original placeholder bytes** are preserved verbatim (e.g., `{age}` stays `{age}`).
-//!
-//! This guarantees:
-//! 1. No implicit type coercion (Integer/Bool/List never become `"42"` or `"true"`)
-//! 2. No information loss from Debug formatting
-//! 3. Original placeholder bytes are preserved exactly (safe for keys containing
-//!    special characters like `{` or `}`)
 //!
 //! ## `get_index`: Negative Index Support
 //!
@@ -50,8 +38,9 @@
 //! - Same input state + same instruction → same output state.
 //! - No randomness, wall-clock time, or side effects.
 //! - `content_hash`: SHA-256 (FIPS 180-4) with deterministic serialization.
-//! - `format_string`: Deterministic string replacement (pure algorithm).
 //! - `get_index`: Deterministic list access (pure indexing).
+//! - `object_keys`: Deterministic sorted key extraction (ER-601 compliant).
+//! - Set operations: Deterministic sorted output (ER-601 compliant).
 //!
 //! # Determinism Boundary (L2-L4)
 //!
@@ -59,21 +48,27 @@
 //! |--------|--------|-----------|
 //! | `content_hash` SHA-256 | ✅ L1 deterministic | FIPS 180-4 |
 //! | `content_hash` key selection | ✅ L1 deterministic | Pure filtering |
-//! | `format_string` replacement | ✅ L1 deterministic | Deterministic algorithm |
-//! | `format_string` strict preservation | ✅ L1 deterministic | Type-based branch |
 //! | `get_index` index resolution | ✅ L1 deterministic | Integer arithmetic |
 //! | `get_index` negative index | ✅ L1 deterministic | List length + index |
 //! | `get_index` out-of-bounds | ✅ L1 deterministic | Returns `Value::Null` |
+//! | `object_keys` sorting | ✅ L1 deterministic | Lexicographic sort |
+//! | Set operations sorting | ✅ L1 deterministic | Lexicographic sort |
 //!
 //! # Cross-Language Note (L4)
 //!
 //! To replicate `content_hash` in other languages, see the encoding specification
-//! in `deterministic.rs`. `format_string` and `get_index` are Rust-only constructs
-//! but their semantics are JSON-compatible.
+//! in `deterministic.rs`.
+//!
+//! # Moved Out of TCB
+//!
+//! `format_string` was moved to the Governance layer because it performs text
+//! template replacement, which violates the TCB's JSON-structured-data-only
+//! design principle. See `governance-core/src/io/primitives.rs` for the migration.
 
 use crate::control::dispatch::resolve_path;
 use crate::deterministic::content_hash;
 use crate::error::EvoRuleError;
+use crate::exec_ctl_ctx::ExecCtlCtx;
 use crate::instruction::registry::InstructionRegistry;
 use crate::rule::GenericInstruction;
 use crate::state::State;
@@ -82,8 +77,11 @@ use crate::value::Value;
 /// Register computation primitives.
 pub fn register(reg: &mut InstructionRegistry) {
     reg.register("content_hash", exec_content_hash);
-    reg.register("format_string", exec_format_string);
     reg.register("get_index", exec_get_index);
+    reg.register("object_keys", exec_object_keys);
+    reg.register("set_intersection", exec_set_intersection);
+    reg.register("set_diff", exec_set_diff);
+    reg.register("set_union", exec_set_union);
 }
 
 // ══════════════════════════════════════════════
@@ -110,6 +108,7 @@ pub(crate) fn exec_content_hash(
     _reg: &crate::instruction::registry::InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let keys = instruction
         .params
@@ -136,101 +135,7 @@ pub(crate) fn exec_content_hash(
     };
 
     let hash = content_hash(&values);
-    Ok(state.set_path(store_as, Value::string(hash)))
-}
-
-// ══════════════════════════════════════════════
-// format_string
-// ══════════════════════════════════════════════
-
-/// Template string replacement — parses `{key}` placeholders and replaces them.
-///
-/// # Parameters
-/// - `template`: The template string with `{key}` placeholders.
-/// - `store_as` (optional): Attribute to store the result (default: `"formatted"`).
-/// - `source` (optional): Object to use as the value source (overrides state).
-///
-/// # Strict Preservation Redline
-///
-/// Only `Value::String` typed values are substituted. For any other case
-/// (non-String value types, missing keys, or `Value::Null`), the **original
-/// placeholder bytes** are preserved verbatim (e.g., `{age}` stays as `{age}`).
-///
-/// This guarantees:
-/// 1. No implicit type coercion (Integer/Bool/List never become `"Integer(42)"` etc.)
-/// 2. No information loss from Debug formatting
-/// 3. Original placeholder bytes are preserved exactly (safe for keys containing
-///    special characters like `{` or `}`)
-///
-/// # Example
-/// ```json
-/// {
-///   "type": "format_string",
-///   "params": {
-///     "template": "Hello {name}, score={score}",
-///     "store_as": "message"
-///   }
-/// }
-/// ```
-pub(crate) fn exec_format_string(
-    _reg: &InstructionRegistry,
-    state: &State,
-    instruction: &GenericInstruction,
-) -> Result<State, EvoRuleError> {
-    let template = instruction
-        .params
-        .get("template")
-        .and_then(|v| {
-            resolve_path(state, v)
-                .as_str()
-                .map(std::string::ToString::to_string)
-        })
-        .unwrap_or_default();
-
-    let store_as = instruction
-        .params
-        .get("store_as")
-        .and_then(|v| {
-            resolve_path(state, v)
-                .as_str()
-                .map(std::string::ToString::to_string)
-        })
-        .unwrap_or_else(|| "formatted".to_string());
-
-    let source = instruction.params.get("source").cloned();
-
-    let mut result = template;
-    let mut start = 0;
-    let mut replacements = Vec::new();
-    while let Some(open) = result[start..].find('{') {
-        let abs_open = start + open;
-        if let Some(close) = result[abs_open..].find('}') {
-            let key = &result[abs_open + 1..abs_open + close];
-            let value = if let Some(ref src) = source {
-                src.get(key).cloned()
-            } else {
-                state.get(key).cloned()
-            };
-            // Strict preservation: only String values are substituted.
-            // Non-String types (Integer/Bool/Float/List/Object/Null) and missing keys
-            // preserve the original placeholder bytes verbatim.
-            let original_placeholder = &result[abs_open..=(abs_open + close)];
-            let replacement = match value {
-                Some(Value::String(s)) => s,
-                _ => original_placeholder.to_string(),
-            };
-            replacements.push((abs_open, abs_open + close + 1, replacement));
-            start = abs_open + close + 1;
-        } else {
-            break;
-        }
-    }
-
-    for (from, to, replacement) in replacements.into_iter().rev() {
-        result.replace_range(from..to, &replacement);
-    }
-
-    Ok(state.set_path(&store_as, Value::string(&result)))
+    state.set_path(store_as, Value::string(hash))
 }
 
 // ══════════════════════════════════════════════
@@ -265,6 +170,7 @@ pub(crate) fn exec_get_index(
     _reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let ref_val = instruction
         .params
@@ -321,7 +227,217 @@ pub(crate) fn exec_get_index(
         })
         .unwrap_or(Value::Null);
 
-    Ok(state.set_path(&result_attr, item))
+    state.set_path(&result_attr, item)
+}
+
+// ══════════════════════════════════════════════
+// object_keys
+// ══════════════════════════════════════════════
+
+/// Extract keys from a Value::Object into a sorted list.
+///
+/// # Parameters
+/// - `ref`: Reference to the object (resolved via `$ref`).
+/// - `result_attr` (optional): Attribute to store the result (default: `"keys"`).
+///
+/// # Behavior
+/// - Returns a sorted list of keys from the object.
+/// - ER-601: Keys are sorted lexicographically for deterministic output order.
+/// - Non-object values (List, Integer, String, Null) return an empty list.
+/// - Empty objects return an empty list.
+///
+/// # Example
+/// ```json
+/// {
+///   "type": "object_keys",
+///   "params": {
+///     "ref": "_transform",
+///     "result_attr": "_field_list"
+///   }
+/// }
+/// ```
+pub(crate) fn exec_object_keys(
+    _reg: &InstructionRegistry,
+    state: &State,
+    instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
+) -> Result<State, EvoRuleError> {
+    let ref_val = instruction
+        .params
+        .get("ref")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let ref_str = resolve_path(state, &ref_val);
+
+    let result_attr = instruction
+        .params
+        .get("result_attr")
+        .and_then(|v| {
+            resolve_path(state, v)
+                .as_str()
+                .map(std::string::ToString::to_string)
+        })
+        .unwrap_or_else(|| "keys".to_string());
+
+    let obj_value = match ref_str {
+        Value::String(ref s) => {
+            let path = s.strip_prefix('$').unwrap_or(s);
+            state.get_path(path).unwrap_or(Value::Null)
+        }
+        _ => ref_str,
+    };
+
+    let keys = match obj_value {
+        Value::Object(map) => {
+            let mut keys: Vec<String> = map.keys().cloned().collect();
+            // ER-601: Sort keys for deterministic output order.
+            keys.sort();
+            Value::list(keys.into_iter().map(Value::string).collect())
+        }
+        _ => Value::list(vec![]),
+    };
+
+    state.set_path(&result_attr, keys)
+}
+
+// ══════════════════════════════════════════════
+// set_intersection
+// ══════════════════════════════════════════════
+
+pub(crate) fn exec_set_intersection(
+    _reg: &InstructionRegistry,
+    state: &State,
+    instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
+) -> Result<State, EvoRuleError> {
+    let list_a = extract_string_list(state, instruction, "list_a");
+    let list_b = extract_string_list(state, instruction, "list_b");
+    let result_attr = instruction
+        .params
+        .get("result_attr")
+        .and_then(|v| {
+            resolve_path(state, v)
+                .as_str()
+                .map(std::string::ToString::to_string)
+        })
+        .unwrap_or_else(|| "intersection".to_string());
+
+    let set_a: std::collections::HashSet<_> = list_a.into_iter().collect();
+    let intersection: Vec<String> = list_b.into_iter().filter(|x| set_a.contains(x)).collect();
+
+    // ER-601: Sort for deterministic output order.
+    let mut result = intersection;
+    result.sort();
+
+    state.set_path(
+        &result_attr,
+        Value::list(result.into_iter().map(Value::string).collect()),
+    )
+}
+
+// ══════════════════════════════════════════════
+// set_diff
+// ══════════════════════════════════════════════
+
+pub(crate) fn exec_set_diff(
+    _reg: &InstructionRegistry,
+    state: &State,
+    instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
+) -> Result<State, EvoRuleError> {
+    let list_a = extract_string_list(state, instruction, "list_a");
+    let list_b = extract_string_list(state, instruction, "list_b");
+    let result_attr = instruction
+        .params
+        .get("result_attr")
+        .and_then(|v| {
+            resolve_path(state, v)
+                .as_str()
+                .map(std::string::ToString::to_string)
+        })
+        .unwrap_or_else(|| "diff".to_string());
+
+    let set_b: std::collections::HashSet<_> = list_b.into_iter().collect();
+    let diff: Vec<String> = list_a.into_iter().filter(|x| !set_b.contains(x)).collect();
+
+    // ER-601: Sort for deterministic output order.
+    let mut result = diff;
+    result.sort();
+
+    state.set_path(
+        &result_attr,
+        Value::list(result.into_iter().map(Value::string).collect()),
+    )
+}
+
+// ══════════════════════════════════════════════
+// set_union
+// ══════════════════════════════════════════════
+
+pub(crate) fn exec_set_union(
+    _reg: &InstructionRegistry,
+    state: &State,
+    instruction: &GenericInstruction,
+    _ctx: &mut ExecCtlCtx,
+) -> Result<State, EvoRuleError> {
+    let list_a = extract_string_list(state, instruction, "list_a");
+    let list_b = extract_string_list(state, instruction, "list_b");
+    let result_attr = instruction
+        .params
+        .get("result_attr")
+        .and_then(|v| {
+            resolve_path(state, v)
+                .as_str()
+                .map(std::string::ToString::to_string)
+        })
+        .unwrap_or_else(|| "union".to_string());
+
+    let mut set: std::collections::HashSet<_> = list_a.into_iter().collect();
+    set.extend(list_b);
+
+    // ER-601: Sort for deterministic output order.
+    let mut result: Vec<String> = set.into_iter().collect();
+    result.sort();
+
+    state.set_path(
+        &result_attr,
+        Value::list(result.into_iter().map(Value::string).collect()),
+    )
+}
+
+// ══════════════════════════════════════════════
+// Helper: extract_string_list
+// ══════════════════════════════════════════════
+
+fn extract_string_list(
+    state: &State,
+    instruction: &GenericInstruction,
+    param_name: &str,
+) -> Vec<String> {
+    let ref_val = instruction
+        .params
+        .get(param_name)
+        .cloned()
+        .unwrap_or(Value::Null);
+    let resolved = resolve_path(state, &ref_val);
+
+    match resolved {
+        Value::String(ref s) => {
+            let path = s.strip_prefix('$').unwrap_or(s);
+            match state.get_path(path) {
+                Some(Value::List(list)) => list
+                    .iter()
+                    .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
+                    .collect(),
+                _ => Vec::new(),
+            }
+        }
+        Value::List(list) => list
+            .iter()
+            .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 // ══════════════════════════════════════════════
@@ -338,7 +454,8 @@ mod tests {
         let _reg = crate::instruction::registry::InstructionRegistry::new();
         let state = State::new(vec![("x", Value::Integer(42))]);
         let instr = GenericInstruction::simple("content_hash");
-        let result = exec_content_hash(&_reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_content_hash(&_reg, &state, &instr, &mut ctx).unwrap();
         let hash = result.get("__hash__").and_then(|v| v.as_str()).unwrap();
         assert_eq!(hash.len(), 64); // SHA-256
     }
@@ -355,293 +472,11 @@ mod tests {
         ]);
         let instr = GenericInstruction::new("content_hash", params);
         let reg = crate::instruction::registry::InstructionRegistry::new();
-        let result = exec_content_hash(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_content_hash(&reg, &state, &instr, &mut ctx).unwrap();
         assert!(result.get("hash").is_some());
         let hash = result.get("hash").unwrap().as_str().unwrap();
         assert!(!hash.is_empty());
-    }
-
-    #[test]
-    fn test_format_string_basic_placeholders() {
-        let state = State::new(vec![
-            ("name", Value::string("Alice")),
-            ("score", Value::string("95")),
-        ]);
-        let params = {
-            let mut p = HashMap::new();
-            p.insert(
-                "template".to_string(),
-                Value::string("Hello {name}, score={score}"),
-            );
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(
-            result.get("formatted"),
-            Some(&Value::string("Hello Alice, score=95"))
-        );
-    }
-
-    #[test]
-    fn test_format_string_missing_key_preserves_placeholder() {
-        let state = State::new(vec![("name", Value::string("Bob"))]);
-        let params = {
-            let mut p = HashMap::new();
-            p.insert(
-                "template".to_string(),
-                Value::string("Hello {name}, age={age}"),
-            );
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(
-            result.get("formatted"),
-            Some(&Value::string("Hello Bob, age={age}"))
-        );
-    }
-
-    #[test]
-    fn test_format_string_custom_store_attr() {
-        let state = State::new(vec![("x", Value::string("42"))]);
-        let params = {
-            let mut p = HashMap::new();
-            p.insert("template".to_string(), Value::string("val={x}"));
-            p.insert("store_as".to_string(), Value::string("output"));
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(result.get("output"), Some(&Value::string("val=42")));
-    }
-
-    #[test]
-    fn test_format_string_source_object_overrides_state() {
-        let state = State::new(vec![("name", Value::string("StateName"))]);
-        let source = Value::from(im::HashMap::from(vec![(
-            "name".to_string(),
-            Value::string("SourceName"),
-        )]));
-        let params = {
-            let mut p = HashMap::new();
-            p.insert("template".to_string(), Value::string("name={name}"));
-            p.insert("source".to_string(), source);
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(
-            result.get("formatted"),
-            Some(&Value::string("name=SourceName"))
-        );
-    }
-
-    // ─── Strict preservation redline tests (ER-600 series) ───────────────
-    // Only Value::String is substituted; all other types preserve {key} verbatim.
-
-    #[test]
-    fn test_format_string_integer_value_preserves_placeholder() {
-        // Integer in state → {count} preserved, not "42" or "Integer(42)"
-        let state = State::new(vec![("count", Value::Integer(42))]);
-        let params = {
-            let mut p = HashMap::new();
-            p.insert("template".to_string(), Value::string("count={count}"));
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(
-            result.get("formatted"),
-            Some(&Value::string("count={count}"))
-        );
-    }
-
-    #[test]
-    fn test_format_string_float_value_preserves_placeholder() {
-        let state = State::new(vec![("pi", Value::float(2.71))]);
-        let params = {
-            let mut p = HashMap::new();
-            p.insert("template".to_string(), Value::string("pi={pi}"));
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(result.get("formatted"), Some(&Value::string("pi={pi}")));
-    }
-
-    #[test]
-    fn test_format_string_bool_value_preserves_placeholder() {
-        let state = State::new(vec![("flag", Value::Bool(true))]);
-        let params = {
-            let mut p = HashMap::new();
-            p.insert("template".to_string(), Value::string("flag={flag}"));
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(result.get("formatted"), Some(&Value::string("flag={flag}")));
-    }
-
-    #[test]
-    fn test_format_string_list_value_preserves_placeholder() {
-        let state = State::new(vec![(
-            "items",
-            Value::list(vec![Value::Integer(1), Value::Integer(2)]),
-        )]);
-        let params = {
-            let mut p = HashMap::new();
-            p.insert("template".to_string(), Value::string("items={items}"));
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(
-            result.get("formatted"),
-            Some(&Value::string("items={items}"))
-        );
-    }
-
-    #[test]
-    fn test_format_string_object_value_preserves_placeholder() {
-        let state = State::new(vec![(
-            "config",
-            Value::from(im::HashMap::from(vec![(
-                "k".to_string(),
-                Value::string("v"),
-            )])),
-        )]);
-        let params = {
-            let mut p = HashMap::new();
-            p.insert("template".to_string(), Value::string("cfg={config}"));
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(
-            result.get("formatted"),
-            Some(&Value::string("cfg={config}"))
-        );
-    }
-
-    #[test]
-    fn test_format_string_null_value_preserves_placeholder() {
-        // Explicit Null in state → {key} preserved (not "Null" or "null")
-        let state = State::new(vec![("missing", Value::Null)]);
-        let params = {
-            let mut p = HashMap::new();
-            p.insert("template".to_string(), Value::string("v={missing}"));
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(result.get("formatted"), Some(&Value::string("v={missing}")));
-    }
-
-    #[test]
-    fn test_format_string_mixed_string_and_non_string_in_same_template() {
-        // Mixed: String key substitutes, non-String key preserves
-        let state = State::new(vec![
-            ("name", Value::string("Alice")),
-            ("count", Value::Integer(42)),
-            ("flag", Value::Bool(true)),
-        ]);
-        let params = {
-            let mut p = HashMap::new();
-            p.insert(
-                "template".to_string(),
-                Value::string("{name}: count={count}, flag={flag}"),
-            );
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(
-            result.get("formatted"),
-            Some(&Value::string("Alice: count={count}, flag={flag}"))
-        );
-    }
-
-    #[test]
-    fn test_format_string_source_null_value_preserves_placeholder() {
-        // source provided with explicit Null → {key} preserved (not "Null")
-        let state = State::empty();
-        let source = Value::from(im::HashMap::from(vec![("name".to_string(), Value::Null)]));
-        let params = {
-            let mut p = HashMap::new();
-            p.insert("template".to_string(), Value::string("name={name}"));
-            p.insert("source".to_string(), source);
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(result.get("formatted"), Some(&Value::string("name={name}")));
-    }
-
-    #[test]
-    fn test_format_string_source_integer_value_preserves_placeholder() {
-        // source with non-String type → {key} preserved
-        let state = State::empty();
-        let source = Value::from(im::HashMap::from(vec![(
-            "count".to_string(),
-            Value::Integer(99),
-        )]));
-        let params = {
-            let mut p = HashMap::new();
-            p.insert("template".to_string(), Value::string("count={count}"));
-            p.insert("source".to_string(), source);
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(
-            result.get("formatted"),
-            Some(&Value::string("count={count}"))
-        );
-    }
-
-    #[test]
-    fn test_format_string_original_placeholder_bytes_preserved_exactly() {
-        // Verify original placeholder bytes are preserved (not reconstructed via format!)
-        // Using a key that would behave differently if reconstructed
-        let state = State::empty();
-        let params = {
-            let mut p = HashMap::new();
-            p.insert("template".to_string(), Value::string("value={key}"));
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        // Must be exactly "{key}" not "{key}" reconstructed with different bytes
-        assert_eq!(result.get("formatted"), Some(&Value::string("value={key}")));
     }
 
     #[test]
@@ -662,8 +497,14 @@ mod tests {
         };
         let instr = GenericInstruction::new("get_index", params);
 
-        let result =
-            exec_get_index(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_get_index(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         assert_eq!(result.get("item"), Some(&Value::Integer(30)));
     }
 
@@ -681,8 +522,14 @@ mod tests {
         };
         let instr = GenericInstruction::new("get_index", params);
 
-        let result =
-            exec_get_index(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_get_index(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         assert_eq!(result.get("item"), Some(&Value::Null));
     }
 
@@ -697,69 +544,20 @@ mod tests {
         };
         let instr = GenericInstruction::new("get_index", params);
 
-        let result =
-            exec_get_index(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_get_index(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         assert_eq!(result.get("item"), Some(&Value::Integer(42)));
     }
 
     // ─── P1: Error path and boundary tests ─────────────────────────────────
     // Verify graceful handling of missing params, out-of-bounds indices, and
     // type mismatches. Aligns with ER-600 (no runtime panics).
-
-    #[test]
-    fn test_format_string_missing_template_returns_empty_string() {
-        // Missing "template" param → unwrap_or_default() yields empty string
-        let state = State::empty();
-        let instr = GenericInstruction::new("format_string", HashMap::new());
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(
-            result.get("formatted"),
-            Some(&Value::string("")),
-            "missing template should yield empty formatted string, not Err"
-        );
-    }
-
-    #[test]
-    fn test_format_string_missing_store_as_defaults_to_formatted() {
-        // Missing "store_as" → defaults to "formatted"
-        let state = State::new(vec![("name", Value::string("Alice"))]);
-        let params = {
-            let mut p = HashMap::new();
-            p.insert("template".to_string(), Value::string("hi {name}"));
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(
-            result.get("formatted"),
-            Some(&Value::string("hi Alice")),
-            "missing store_as should default to 'formatted'"
-        );
-    }
-
-    #[test]
-    fn test_format_string_unclosed_brace_preserved() {
-        // Unclosed { brace → no replacement, brace preserved as-is
-        let state = State::empty();
-        let params = {
-            let mut p = HashMap::new();
-            p.insert("template".to_string(), Value::string("hello {world"));
-            p
-        };
-        let instr = GenericInstruction::new("format_string", params);
-
-        let result =
-            exec_format_string(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
-        assert_eq!(
-            result.get("formatted"),
-            Some(&Value::string("hello {world")),
-            "unclosed brace should be preserved verbatim"
-        );
-    }
 
     #[test]
     fn test_get_index_out_of_bounds_positive_returns_null() {
@@ -776,8 +574,14 @@ mod tests {
         };
         let instr = GenericInstruction::new("get_index", params);
 
-        let result =
-            exec_get_index(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_get_index(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         assert_eq!(
             result.get("item"),
             Some(&Value::Null),
@@ -800,8 +604,14 @@ mod tests {
         };
         let instr = GenericInstruction::new("get_index", params);
 
-        let result =
-            exec_get_index(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_get_index(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         assert_eq!(
             result.get("item"),
             Some(&Value::Null),
@@ -821,8 +631,14 @@ mod tests {
         };
         let instr = GenericInstruction::new("get_index", params);
 
-        let result =
-            exec_get_index(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_get_index(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         assert_eq!(
             result.get("item"),
             Some(&Value::Null),
@@ -841,8 +657,14 @@ mod tests {
         };
         let instr = GenericInstruction::new("get_index", params);
 
-        let result =
-            exec_get_index(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_get_index(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         assert_eq!(
             result.get("item"),
             Some(&Value::Null),
@@ -856,8 +678,14 @@ mod tests {
         let state = State::new(vec![("x", Value::Integer(10))]);
         let instr = GenericInstruction::new("content_hash", HashMap::new());
 
-        let result =
-            exec_content_hash(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_content_hash(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         // Should produce a hash string at default __hash__ attr
         let hash = result.get("__hash__").and_then(|v| v.as_str());
         assert!(
@@ -888,8 +716,14 @@ mod tests {
         };
         let instr = GenericInstruction::new("content_hash", params);
 
-        let result =
-            exec_content_hash(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_content_hash(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         let hash = result.get("__hash__").and_then(|v| v.as_str());
         assert!(
             hash.is_some() && !hash.unwrap().is_empty(),
@@ -908,8 +742,14 @@ mod tests {
         };
         let instr = GenericInstruction::new("content_hash", params);
 
-        let result =
-            exec_content_hash(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_content_hash(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         let hash = result.get("__hash__").and_then(|v| v.as_str());
         assert!(
             hash.is_some() && !hash.unwrap().is_empty(),
@@ -934,12 +774,335 @@ mod tests {
         };
         let instr = GenericInstruction::new("content_hash", params);
 
-        let result =
-            exec_content_hash(&crate::primitive::make_test_registry(), &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_content_hash(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
         let hash = result.get("__hash__").and_then(|v| v.as_str());
         assert!(
             hash.is_some() && !hash.unwrap().is_empty(),
             "missing key in state should use Null, still producing valid hash"
         );
+    }
+
+    #[test]
+    fn test_exec_object_keys() {
+        let state = State::new(vec![(
+            "_transform",
+            Value::from(im::HashMap::from(vec![
+                ("field_b".to_string(), Value::Null),
+                ("field_a".to_string(), Value::Null),
+                ("field_c".to_string(), Value::Null),
+            ])),
+        )]);
+        let params = HashMap::from([
+            ("ref".to_string(), Value::string("_transform")),
+            ("result_attr".to_string(), Value::string("_keys")),
+        ]);
+        let instr = GenericInstruction::new("object_keys", params);
+
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_object_keys(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
+
+        let keys = result.get("_keys").unwrap();
+        assert!(keys.is_list());
+        let key_list = keys.as_list().unwrap();
+        assert_eq!(key_list.len(), 3);
+        assert_eq!(key_list[0].as_str(), Some("field_a"));
+        assert_eq!(key_list[1].as_str(), Some("field_b"));
+        assert_eq!(key_list[2].as_str(), Some("field_c"));
+    }
+
+    #[test]
+    fn test_exec_object_keys_empty_object() {
+        let state = State::new(vec![("_empty", Value::from(im::HashMap::new()))]);
+        let params = HashMap::from([
+            ("ref".to_string(), Value::string("_empty")),
+            ("result_attr".to_string(), Value::string("_keys")),
+        ]);
+        let instr = GenericInstruction::new("object_keys", params);
+
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_object_keys(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
+
+        let keys = result.get("_keys").unwrap();
+        assert!(keys.is_list());
+        assert!(keys.as_list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_exec_object_keys_non_object() {
+        let state = State::new(vec![(
+            "_list",
+            Value::list(vec![Value::Integer(1), Value::Integer(2)]),
+        )]);
+        let params = HashMap::from([
+            ("ref".to_string(), Value::string("_list")),
+            ("result_attr".to_string(), Value::string("_keys")),
+        ]);
+        let instr = GenericInstruction::new("object_keys", params);
+
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_object_keys(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
+
+        let keys = result.get("_keys").unwrap();
+        assert!(keys.is_list());
+        assert!(keys.as_list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_exec_object_keys_null() {
+        let state = State::new(vec![("_null", Value::Null)]);
+        let params = HashMap::from([
+            ("ref".to_string(), Value::string("_null")),
+            ("result_attr".to_string(), Value::string("_keys")),
+        ]);
+        let instr = GenericInstruction::new("object_keys", params);
+
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_object_keys(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
+
+        let keys = result.get("_keys").unwrap();
+        assert!(keys.is_list());
+        assert!(keys.as_list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_exec_set_intersection() {
+        let state = State::new(vec![
+            (
+                "_a",
+                Value::list(vec![
+                    Value::string("x"),
+                    Value::string("y"),
+                    Value::string("z"),
+                ]),
+            ),
+            (
+                "_b",
+                Value::list(vec![
+                    Value::string("y"),
+                    Value::string("z"),
+                    Value::string("w"),
+                ]),
+            ),
+        ]);
+        let params = HashMap::from([
+            ("list_a".to_string(), Value::string("_a")),
+            ("list_b".to_string(), Value::string("_b")),
+            ("result_attr".to_string(), Value::string("_intersection")),
+        ]);
+        let instr = GenericInstruction::new("set_intersection", params);
+
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_intersection(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
+
+        let intersection = result.get("_intersection").unwrap();
+        assert!(intersection.is_list());
+        let list = intersection.as_list().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].as_str(), Some("y"));
+        assert_eq!(list[1].as_str(), Some("z"));
+    }
+
+    #[test]
+    fn test_exec_set_diff() {
+        let state = State::new(vec![
+            (
+                "_a",
+                Value::list(vec![
+                    Value::string("x"),
+                    Value::string("y"),
+                    Value::string("z"),
+                ]),
+            ),
+            (
+                "_b",
+                Value::list(vec![
+                    Value::string("y"),
+                    Value::string("z"),
+                    Value::string("w"),
+                ]),
+            ),
+        ]);
+        let params = HashMap::from([
+            ("list_a".to_string(), Value::string("_a")),
+            ("list_b".to_string(), Value::string("_b")),
+            ("result_attr".to_string(), Value::string("_diff")),
+        ]);
+        let instr = GenericInstruction::new("set_diff", params);
+
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_diff(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
+
+        let diff = result.get("_diff").unwrap();
+        assert!(diff.is_list());
+        let list = diff.as_list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].as_str(), Some("x"));
+    }
+
+    #[test]
+    fn test_exec_set_union() {
+        let state = State::new(vec![
+            (
+                "_a",
+                Value::list(vec![
+                    Value::string("x"),
+                    Value::string("y"),
+                    Value::string("z"),
+                ]),
+            ),
+            (
+                "_b",
+                Value::list(vec![
+                    Value::string("y"),
+                    Value::string("z"),
+                    Value::string("w"),
+                ]),
+            ),
+        ]);
+        let params = HashMap::from([
+            ("list_a".to_string(), Value::string("_a")),
+            ("list_b".to_string(), Value::string("_b")),
+            ("result_attr".to_string(), Value::string("_union")),
+        ]);
+        let instr = GenericInstruction::new("set_union", params);
+
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_union(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
+
+        let union = result.get("_union").unwrap();
+        assert!(union.is_list());
+        let list = union.as_list().unwrap();
+        assert_eq!(list.len(), 4);
+        assert_eq!(list[0].as_str(), Some("w"));
+        assert_eq!(list[1].as_str(), Some("x"));
+        assert_eq!(list[2].as_str(), Some("y"));
+        assert_eq!(list[3].as_str(), Some("z"));
+    }
+
+    #[test]
+    fn test_exec_set_intersection_empty() {
+        let state = State::new(vec![
+            ("_a", Value::list(vec![Value::string("x")])),
+            ("_b", Value::list(vec![Value::string("y")])),
+        ]);
+        let params = HashMap::from([
+            ("list_a".to_string(), Value::string("_a")),
+            ("list_b".to_string(), Value::string("_b")),
+        ]);
+        let instr = GenericInstruction::new("set_intersection", params);
+
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_intersection(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
+
+        let intersection = result.get("intersection").unwrap();
+        assert!(intersection.is_list());
+        assert!(intersection.as_list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_exec_set_diff_empty_list_a() {
+        let state = State::new(vec![
+            ("_a", Value::list(vec![])),
+            ("_b", Value::list(vec![Value::string("y")])),
+        ]);
+        let params = HashMap::from([
+            ("list_a".to_string(), Value::string("_a")),
+            ("list_b".to_string(), Value::string("_b")),
+        ]);
+        let instr = GenericInstruction::new("set_diff", params);
+
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_diff(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
+
+        let diff = result.get("diff").unwrap();
+        assert!(diff.is_list());
+        assert!(diff.as_list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_exec_set_union_empty_lists() {
+        let state = State::new(vec![
+            ("_a", Value::list(vec![])),
+            ("_b", Value::list(vec![])),
+        ]);
+        let params = HashMap::from([
+            ("list_a".to_string(), Value::string("_a")),
+            ("list_b".to_string(), Value::string("_b")),
+        ]);
+        let instr = GenericInstruction::new("set_union", params);
+
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_set_union(
+            &crate::primitive::make_test_registry(),
+            &state,
+            &instr,
+            &mut ctx,
+        )
+        .unwrap();
+
+        let union = result.get("union").unwrap();
+        assert!(union.is_list());
+        assert!(union.as_list().unwrap().is_empty());
     }
 }

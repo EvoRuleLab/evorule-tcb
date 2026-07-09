@@ -57,7 +57,8 @@
 //! and the branch list, which are JSON-serializable.
 
 use crate::control::dispatch::resolve_path;
-use crate::error::EvoRuleError;
+use crate::error::{invalid_param, missing_param, type_error, EvoRuleError};
+use crate::exec_ctl_ctx::ExecCtlCtx;
 use crate::instruction::registry::InstructionRegistry;
 use crate::rule::GenericInstruction;
 use crate::state::State;
@@ -87,10 +88,11 @@ pub(crate) fn exec_execute_try_catch(
     reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let try_raw = match instruction.params.get("try") {
         Some(v) => v.clone(),
-        None => return Ok(state.clone()),
+        None => return Err(missing_param("execute_try_catch", "try")),
     };
     let try_val = resolve_path(state, &try_raw);
 
@@ -109,14 +111,14 @@ pub(crate) fn exec_execute_try_catch(
 
     let try_instr = GenericInstruction::from_value(&try_val)?;
 
-    match reg.execute(state, &try_instr) {
+    match reg.execute(state, &try_instr, ctx) {
         Ok(result) => Ok(result),
         Err(e) => {
-            let state_with_error = state.set_path(&error_attr, Value::string(format!("{e}")));
+            let state_with_error = state.set_path(&error_attr, Value::string(format!("{e}")))?;
 
             if let Some(catch_v) = catch_val {
                 let catch_instr = GenericInstruction::from_value(&catch_v)?;
-                match reg.execute(&state_with_error, &catch_instr) {
+                match reg.execute(&state_with_error, &catch_instr, ctx) {
                     Ok(result) => Ok(result),
                     Err(_) => Ok(state_with_error),
                 }
@@ -152,10 +154,11 @@ pub(crate) fn exec_execute_parallel(
     reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let branches_val = match instruction.params.get("branches") {
         Some(v) => resolve_path(state, v),
-        None => return Ok(state.clone()),
+        None => return Err(missing_param("execute_parallel", "branches")),
     };
 
     let merge_strategy = instruction
@@ -180,7 +183,7 @@ pub(crate) fn exec_execute_parallel(
 
     let branches = match branches_val {
         Value::List(ref v) => v.clone(),
-        _ => return Ok(state.clone()),
+        _ => return Err(type_error("List", branches_val.type_name())),
     };
 
     let mut results: Vec<State> = Vec::new();
@@ -198,7 +201,7 @@ pub(crate) fn exec_execute_parallel(
             }
         };
 
-        match reg.execute(state, &branch_instr) {
+        match reg.execute(state, &branch_instr, ctx) {
             Ok(result) => results.push(result),
             Err(e) => {
                 last_error = Some(e);
@@ -213,7 +216,11 @@ pub(crate) fn exec_execute_parallel(
         if let Some(e) = last_error {
             return Err(e);
         }
-        return Ok(state.clone());
+        return Err(invalid_param(
+            "execute_parallel",
+            "branches",
+            "empty branches list or all branches failed",
+        ));
     }
 
     match merge_strategy.as_str() {
@@ -229,23 +236,59 @@ pub(crate) fn exec_execute_parallel(
             let mut merged = state.clone();
             let mut provenance = im::HashMap::new();
 
-            for (branch_idx, result) in results.iter().enumerate() {
+            // BUG-07 fix: violates ER-601 determinism.
+            // Original implementation iterates `result.data().iter()` (im::HashMap), whose iteration order
+            // is not guaranteed across platforms/versions/hash seeds, causing final values to depend on
+            // iteration order when multiple branches write to the same field — non-deterministic.
+            //
+            // Fix strategy:
+            // 1. Collect all field names modified by branches, sort lexicographically (deterministic).
+            // 2. For each field, iterate by branch_idx ascending, the last branch to modify the field wins.
+            //    (consistent with default "last_wins" semantics).
+            // 3. provenance records the branch index of the last write.
+            //
+            // This follows the same ER-601 fix pattern as state.rs::set_array_element_by_index:
+            // eliminate HashMap iteration order uncertainty through explicit sorting.
+
+            // Step 1: Collect all modified fields (non-system fields that differ from initial value)
+            let mut changed_keys: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for result in &results {
                 for (k, v) in result.data().iter() {
                     if system_fields.contains(&k.as_str()) {
                         continue;
                     }
                     let initial_val = state.get(k);
                     if initial_val != Some(v) {
-                        merged = merged.set(k, v.clone());
-                        // P2-2: Record field source branch
-                        provenance.insert(
-                            k.clone(),
-                            Value::Object(im::hashmap! {
-                                "branch".to_string() => Value::Integer(branch_idx as i64),
-                                "total_branches".to_string() => Value::Integer(results.len() as i64),
-                            }),
-                        );
+                        changed_keys.insert(k.clone());
                     }
+                }
+            }
+            let mut changed_keys: Vec<String> = changed_keys.into_iter().collect();
+            changed_keys.sort();
+
+            // Step 2: For each field, find the last writer by iterating branch_idx ascending
+            for k in &changed_keys {
+                let mut last_value: Option<Value> = None;
+                let mut last_branch_idx: usize = 0;
+                for (branch_idx, result) in results.iter().enumerate() {
+                    if let Some(v) = result.data().get(k) {
+                        let initial_val = state.get(k);
+                        if initial_val != Some(v) {
+                            last_value = Some(v.clone());
+                            last_branch_idx = branch_idx;
+                        }
+                    }
+                }
+                if let Some(v) = last_value {
+                    merged = merged.set(k.clone(), v);
+                    provenance.insert(
+                        k.clone(),
+                        Value::Object(im::hashmap! {
+                            "branch".to_string() => Value::Integer(last_branch_idx as i64),
+                            "total_branches".to_string() => Value::Integer(results.len() as i64),
+                        }),
+                    );
                 }
             }
 
@@ -307,8 +350,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("execute_try_catch", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_execute_try_catch(&make_reg(), &state, &instr).unwrap();
+        let result = exec_execute_try_catch(&make_reg(), &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("x"), Some(&Value::Integer(99)));
     }
 
@@ -339,8 +383,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("execute_try_catch", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_execute_try_catch(&make_reg(), &state, &instr).unwrap();
+        let result = exec_execute_try_catch(&make_reg(), &state, &instr, &mut ctx).unwrap();
         // catch executed, y set to 999
         assert_eq!(result.get("y"), Some(&Value::Integer(999)));
         // error_attr is set
@@ -366,22 +411,23 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("execute_try_catch", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_execute_try_catch(&make_reg(), &state, &instr).unwrap();
+        let result = exec_execute_try_catch(&make_reg(), &state, &instr, &mut ctx).unwrap();
         assert!(result.get("my_err").is_some());
         // x is unchanged
         assert_eq!(result.get("x"), Some(&Value::Integer(10)));
     }
 
     #[test]
-    fn test_try_catch_missing_try_returns_clone() {
-        // No try parameter provided → returns a clone of the original state
+    fn test_try_catch_missing_try_returns_error() {
         let state = make_state();
         let params = HashMap::new();
         let instr = GenericInstruction::new("execute_try_catch", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_execute_try_catch(&make_reg(), &state, &instr).unwrap();
-        assert_eq!(result.get("x"), Some(&Value::Integer(10)));
+        let result = exec_execute_try_catch(&make_reg(), &state, &instr, &mut ctx);
+        assert!(result.is_err(), "missing try parameter should return error");
     }
 
     #[test]
@@ -403,8 +449,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("execute_try_catch", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_execute_try_catch(&make_reg(), &state, &instr).unwrap();
+        let result = exec_execute_try_catch(&make_reg(), &state, &instr, &mut ctx).unwrap();
         // Returns state_with_error (catch failure also returns it)
         assert!(result.get("err").is_some());
     }
@@ -428,8 +475,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("execute_parallel", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_execute_parallel(&make_reg(), &state, &instr).unwrap();
+        let result = exec_execute_parallel(&make_reg(), &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("x"), Some(&Value::Integer(55)));
     }
 
@@ -459,8 +507,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("execute_parallel", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_execute_parallel(&make_reg(), &state, &instr).unwrap();
+        let result = exec_execute_parallel(&make_reg(), &state, &instr, &mut ctx).unwrap();
         assert_eq!(result.get("x"), Some(&Value::Integer(2)));
     }
 
@@ -490,8 +539,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("execute_parallel", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_execute_parallel(&make_reg(), &state, &instr).unwrap();
+        let result = exec_execute_parallel(&make_reg(), &state, &instr, &mut ctx).unwrap();
         // Both x and y were modified
         assert_eq!(result.get("x"), Some(&Value::Integer(1)));
         assert_eq!(result.get("y"), Some(&Value::Integer(2)));
@@ -529,8 +579,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("execute_parallel", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_execute_parallel(&make_reg(), &state, &instr).unwrap();
+        let result = exec_execute_parallel(&make_reg(), &state, &instr, &mut ctx).unwrap();
         let prov = result.get("__parallel_provenance__").unwrap();
         // Verify provenance structure
         assert!(prov.as_object().is_some());
@@ -567,8 +618,9 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("execute_parallel", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_execute_parallel(&make_reg(), &state, &instr);
+        let result = exec_execute_parallel(&make_reg(), &state, &instr, &mut ctx);
         // fail_fast returns Err on the first error
         assert!(result.is_err());
     }
@@ -600,15 +652,15 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("execute_parallel", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_execute_parallel(&make_reg(), &state, &instr).unwrap();
+        let result = exec_execute_parallel(&make_reg(), &state, &instr, &mut ctx).unwrap();
         // The good branch still executed
         assert_eq!(result.get("y"), Some(&Value::Integer(777)));
     }
 
     #[test]
-    fn test_parallel_empty_branches_returns_original() {
-        // Empty branch list → returns the original state
+    fn test_parallel_empty_branches_returns_error() {
         let state = make_state();
         let params = {
             let mut p = HashMap::new();
@@ -616,9 +668,10 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("execute_parallel", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_execute_parallel(&make_reg(), &state, &instr).unwrap();
-        assert_eq!(result.get("x"), Some(&Value::Integer(10)));
+        let result = exec_execute_parallel(&make_reg(), &state, &instr, &mut ctx);
+        assert!(result.is_err(), "empty branches list should return error");
     }
 
     #[test]
@@ -640,8 +693,168 @@ mod tests {
             p
         };
         let instr = GenericInstruction::new("execute_parallel", params);
+        let mut ctx = ExecCtlCtx::new();
 
-        let result = exec_execute_parallel(&make_reg(), &State::empty(), &instr);
+        let result = exec_execute_parallel(&make_reg(), &State::empty(), &instr, &mut ctx);
         assert!(result.is_err());
+    }
+
+    // ══════════════════════════════════════════════
+    // BUG-07 regression test: execute_parallel force merge determinism
+    // ══════════════════════════════════════════════
+    // Original issue: force merge iterates im::HashMap with non-deterministic order.
+    // When multiple branches write to the same field, the final value depends on iteration order,
+    // violating ER-601 determinism.
+    // After fix: fields are processed in sorted order, last branch wins for same field
+    // (consistent with "last_wins" semantics).
+    //
+    // Verification scenario: both branches write to field x, branch0=1, branch1=2.
+    // After fix: should stably return x=2 (branch1 wrote last).
+    #[test]
+    fn test_parallel_force_merge_same_field_is_deterministic() {
+        let state = State::empty();
+        // Both branches write to x with different values
+        let branch0 = GenericInstruction::new("state_set", {
+            let mut p = HashMap::new();
+            p.insert("attr".to_string(), Value::string("x"));
+            p.insert("value".to_string(), Value::Integer(1));
+            p
+        });
+        let branch1 = GenericInstruction::new("state_set", {
+            let mut p = HashMap::new();
+            p.insert("attr".to_string(), Value::string("x"));
+            p.insert("value".to_string(), Value::Integer(2));
+            p
+        });
+        let params = {
+            let mut p = HashMap::new();
+            p.insert(
+                "branches".to_string(),
+                Value::list(vec![branch0.to_value(), branch1.to_value()]),
+            );
+            p.insert("merge".to_string(), Value::string("force"));
+            p
+        };
+        let instr = GenericInstruction::new("execute_parallel", params);
+        let mut ctx = ExecCtlCtx::new();
+
+        // Run multiple times to verify stability
+        for _ in 0..10 {
+            let result = exec_execute_parallel(&make_reg(), &state, &instr, &mut ctx).unwrap();
+            // branch1 wrote last, should win (consistent with default "last_wins" semantics)
+            assert_eq!(
+                result.get("x"),
+                Some(&Value::Integer(2)),
+                "BUG-07 regression: force merge with multiple branches writing same field should stably return last branch's value"
+            );
+        }
+    }
+
+    // Verify provenance field also records in deterministic order
+    #[test]
+    fn test_parallel_force_merge_provenance_deterministic_for_same_field() {
+        let state = State::empty();
+        let branch0 = GenericInstruction::new("state_set", {
+            let mut p = HashMap::new();
+            p.insert("attr".to_string(), Value::string("x"));
+            p.insert("value".to_string(), Value::Integer(1));
+            p
+        });
+        let branch1 = GenericInstruction::new("state_set", {
+            let mut p = HashMap::new();
+            p.insert("attr".to_string(), Value::string("x"));
+            p.insert("value".to_string(), Value::Integer(2));
+            p
+        });
+        let params = {
+            let mut p = HashMap::new();
+            p.insert(
+                "branches".to_string(),
+                Value::list(vec![branch0.to_value(), branch1.to_value()]),
+            );
+            p.insert("merge".to_string(), Value::string("force"));
+            p
+        };
+        let instr = GenericInstruction::new("execute_parallel", params);
+        let mut ctx = ExecCtlCtx::new();
+
+        let result = exec_execute_parallel(&make_reg(), &state, &instr, &mut ctx).unwrap();
+        let prov = result
+            .get("__parallel_provenance__")
+            .expect("force merge should write __parallel_provenance__");
+        let x_prov = prov.get("x").expect("provenance should record field x");
+        // branch1 wrote x last, provenance should record branch=1
+        assert_eq!(
+            x_prov.get("branch"),
+            Some(&Value::Integer(1)),
+            "BUG-07 regression: provenance should record the branch index of last write"
+        );
+        assert_eq!(
+            x_prov.get("total_branches"),
+            Some(&Value::Integer(2)),
+            "total_branches should be 2"
+        );
+    }
+
+    // Verify merge results are stable across different fields and multiple branches
+    #[test]
+    fn test_parallel_force_merge_different_fields_deterministic() {
+        let state = State::empty();
+        // branch0 writes a and b, branch1 writes c and b
+        // b is the conflicting field, branch1 wins
+        let branch0 = GenericInstruction::new("state_set", {
+            let mut p = HashMap::new();
+            p.insert("attr".to_string(), Value::string("a"));
+            p.insert("value".to_string(), Value::Integer(10));
+            p
+        });
+        // state_set is single-field, use multiple branches to construct multi-instruction scenario
+        // Two independent branches to test a and b
+        let branch0_b = GenericInstruction::new("state_set", {
+            let mut p = HashMap::new();
+            p.insert("attr".to_string(), Value::string("b"));
+            p.insert("value".to_string(), Value::Integer(100));
+            p
+        });
+        let branch1 = GenericInstruction::new("state_set", {
+            let mut p = HashMap::new();
+            p.insert("attr".to_string(), Value::string("c"));
+            p.insert("value".to_string(), Value::Integer(20));
+            p
+        });
+        let branch1_b = GenericInstruction::new("state_set", {
+            let mut p = HashMap::new();
+            p.insert("attr".to_string(), Value::string("b"));
+            p.insert("value".to_string(), Value::Integer(200));
+            p
+        });
+        let params = {
+            let mut p = HashMap::new();
+            p.insert(
+                "branches".to_string(),
+                Value::list(vec![
+                    branch0.to_value(),
+                    branch0_b.to_value(),
+                    branch1.to_value(),
+                    branch1_b.to_value(),
+                ]),
+            );
+            p.insert("merge".to_string(), Value::string("force"));
+            p
+        };
+        let instr = GenericInstruction::new("execute_parallel", params);
+        let mut ctx = ExecCtlCtx::new();
+
+        for _ in 0..10 {
+            let result = exec_execute_parallel(&make_reg(), &state, &instr, &mut ctx).unwrap();
+            assert_eq!(result.get("a"), Some(&Value::Integer(10)));
+            assert_eq!(result.get("c"), Some(&Value::Integer(20)));
+            // b is written by branch0_b (idx=1) and branch1_b (idx=3), the latter wins
+            assert_eq!(
+                result.get("b"),
+                Some(&Value::Integer(200)),
+                "BUG-07 regression: b should be determined by the last writing branch (idx=3)"
+            );
+        }
     }
 }

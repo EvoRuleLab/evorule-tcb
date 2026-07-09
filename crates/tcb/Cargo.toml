@@ -19,7 +19,7 @@ description.workspace = true
 im = { workspace = true, features = [
     "serde",
 ] } # im::hashmap! - persistent DS (ER-602 exception)
-log = { workspace = true } # log::trace!, log::warn! - observability
+log = { workspace = true, optional = true } # log::trace!, log::warn! - observability (feature-gated)
 sha2 = { workspace = true } # audit_chain hash (audit.rs, deterministic.rs)
 hmac = { workspace = true } # HMAC signature (audit.rs)
 serde = { workspace = true, features = [
@@ -40,3 +40,4 @@ proptest = { workspace = true }
 
 [features]
 default = []
+tracing = ["dep:log"]

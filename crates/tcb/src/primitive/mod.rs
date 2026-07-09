@@ -25,7 +25,7 @@
 //! - `queue_ops`: Queue operation primitives
 //! - `domain_ops`: Domain operation primitives
 //! - `rule_ops`: Rule operation primitives
-//! - `compute_ops`: Computation primitives (`content_hash`, `format_string`, `get_index`)
+//! - `compute_ops`: Computation primitives (`content_hash`, `get_index`, `object_keys`, set operations)
 //! - `audit_ops`: Audit primitives
 //! - `error_ops`: Error handling primitives
 //! - `noop_ops`: No-op primitive
@@ -122,8 +122,11 @@ pub fn all_exec_fns() -> Vec<(&'static str, ExecutorFn)> {
         ("inject_rule", rule_ops::exec_inject_rule),
         // compute_ops
         ("content_hash", compute_ops::exec_content_hash),
-        ("format_string", compute_ops::exec_format_string),
         ("get_index", compute_ops::exec_get_index),
+        ("object_keys", compute_ops::exec_object_keys),
+        ("set_intersection", compute_ops::exec_set_intersection),
+        ("set_diff", compute_ops::exec_set_diff),
+        ("set_union", compute_ops::exec_set_union),
         // audit_ops
         ("trace_step", audit_ops::exec_trace_step),
         // error_ops
@@ -331,14 +334,6 @@ pub fn all_explainers() -> Vec<(&'static str, ExplainerFn)> {
                 .unwrap_or("state");
             format!("Compute SHA-256 content hash for '{key}'")
         }),
-        ("format_string", |instr| {
-            let fmt = instr
-                .params
-                .get("format")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            format!("Format string: '{fmt}'")
-        }),
         ("get_index", |instr| {
             let key = instr
                 .params
@@ -346,6 +341,23 @@ pub fn all_explainers() -> Vec<(&'static str, ExplainerFn)> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
             format!("Get index value from '{key}'")
+        }),
+        ("object_keys", |instr| {
+            let key = instr
+                .params
+                .get("ref")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            format!("Extract sorted keys from object '{key}'")
+        }),
+        ("set_intersection", |_| {
+            "Compute intersection of two string lists".to_string()
+        }),
+        ("set_diff", |_| {
+            "Compute set difference (list_a minus list_b)".to_string()
+        }),
+        ("set_union", |_| {
+            "Compute union of two string lists (unique, sorted)".to_string()
         }),
         // audit_ops
         ("trace_step", |instr| {

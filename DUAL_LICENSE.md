@@ -77,7 +77,7 @@ When using evorule-tcb under AGPL-3.0, you must:
 The AGPL-3.0 license does NOT:
 
 - Grant any right to use the trademarks associated with
-  evorule-tcb (which include 元则 and EvoRule as textual
+  evorule-tcb (which include Yuanze and EvoRule as textual
   components). See `TRADEMARK.md` for the trademark policy.
 - Provide a warranty of any kind (the software is provided
   "as-is").

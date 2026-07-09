@@ -74,6 +74,7 @@
 
 use crate::audit::compute_state_hash;
 use crate::error::EvoRuleError;
+use crate::exec_ctl_ctx::ExecCtlCtx;
 use crate::instruction::registry::InstructionRegistry;
 use crate::rule::GenericInstruction;
 use crate::state::State;
@@ -94,8 +95,9 @@ pub fn exec_dispatch(
     reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
-    dispatch_by_cases(reg, state, instruction)
+    dispatch_by_cases(reg, state, instruction, ctx)
 }
 
 /// Dispatch by cases table (with recursive $ref resolution).
@@ -103,20 +105,68 @@ pub fn exec_dispatch(
 /// The cases table is the sole dispatch source. $ref references in case entries
 /// are recursively resolved before execution, ensuring that physical primitives
 /// receive fully resolved parameter values.
+///
+/// # Dual-source reading (constitutional dispatch architecture)
+///
+/// The dispatch primitive reads its `cases`/`default` from one of two sources,
+/// decided by whether the caller passed `cases` in the instruction params:
+///
+/// - **Sub-dispatch** (`instruction.params` contains `cases`): the user has
+///   supplied an explicit cases table inline. Read `cases` and `default`
+///   directly from `instruction.params`. This is the legacy/override path,
+///   used by tests and by rules that want to dispatch a one-off table.
+/// - **Main dispatch** (`instruction.params` does NOT contain `cases`): the
+///   caller expects the engine's system dispatch table to drive dispatch.
+///   Read `cases` from `__exec__.dispatch_cases` and `default` from
+///   `__exec__.dispatch_default`. These are injected by `TheEquation` via
+///   [`DispatchTableBuilder`](file:///d:/evorule-project/evorule-governance/crates/governance-core/src/engine/dispatch_table.rs).
+///
+/// This dual-source design keeps the dispatch primitive's surface area
+/// unchanged (still `key`/`cases`/`default`) while letting the system table
+/// be generated dynamically from the live registry + governance aliases.
 fn dispatch_by_cases(
     reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     if let Some(key_val) = instruction.params.get("key") {
         let resolved_key = resolve_path(state, key_val);
         let key_str = resolved_key.to_dispatch_key();
 
-        let cases = instruction
-            .params
-            .get("cases")
-            .cloned()
-            .unwrap_or(Value::empty_object());
+        // ── Dual-source reading ──
+        //
+        // `contains_key("cases")` is the constitutional switch between
+        // sub-dispatch (user-supplied cases) and main dispatch (system table).
+        // We deliberately do NOT fall back to the system table when the user
+        // passes `cases: {}` — an empty object is a legitimate sub-dispatch
+        // request that should hit the default branch, not silently switch
+        // sources.
+        let (cases, default) = if instruction.params.contains_key("cases") {
+            // Sub-dispatch: caller-supplied cases/default.
+            let user_cases = instruction
+                .params
+                .get("cases")
+                .cloned()
+                .unwrap_or(Value::empty_object());
+            let user_default = instruction.params.get("default").cloned();
+            (user_cases, user_default)
+        } else {
+            // Main dispatch: read the system dispatch table from __exec__.
+            // Missing dispatch_cases is treated as an empty table — the
+            // default branch will then fire, which is the safe degradation
+            // path defined by the constitutional architecture.
+            let sys_cases = state
+                .get("__exec__")
+                .and_then(|v| v.get("dispatch_cases"))
+                .cloned()
+                .unwrap_or(Value::empty_object());
+            let sys_default = state
+                .get("__exec__")
+                .and_then(|v| v.get("dispatch_default"))
+                .cloned();
+            (sys_cases, sys_default)
+        };
 
         if let Value::Object(case_map) = &cases {
             // Exact match
@@ -128,7 +178,7 @@ fn dispatch_by_cases(
                 // in cases must be resolved to actual values before constructing GenericInstruction
                 let resolved = resolve_refs(state, case_val);
                 let case_instr = GenericInstruction::from_value(&resolved)?;
-                let result = reg.execute(state, &case_instr)?;
+                let result = reg.execute(state, &case_instr, ctx)?;
 
                 // ── P0-A: Record state hash after execution, write to __exec__.last_dispatch_hashes ──
                 let state_after_hash = compute_dispatch_state_hash(&result);
@@ -154,13 +204,13 @@ fn dispatch_by_cases(
             }
 
             // Default branch
-            if let Some(default_val) = instruction.params.get("default") {
+            if let Some(default_val) = default {
                 // ── P0-A: Record state hash before execution ──
                 let state_before_hash = compute_dispatch_state_hash(state);
 
-                let resolved = resolve_refs(state, default_val);
+                let resolved = resolve_refs(state, &default_val);
                 let default_instr = GenericInstruction::from_value(&resolved)?;
-                let result = reg.execute(state, &default_instr)?;
+                let result = reg.execute(state, &default_instr, ctx)?;
 
                 // ── P0-A: Record state hash after execution ──
                 let state_after_hash = compute_dispatch_state_hash(&result);
@@ -415,7 +465,13 @@ pub fn set_path_value(state: &State, path: &str, value: Value) -> Result<State, 
         return Ok(state.set(parts[0], value));
     }
 
-    // Deep path: need to build intermediate objects
+    if parts.len() > crate::state::MAX_PATH_DEPTH {
+        return Err(crate::error::path_depth_exceeded(
+            parts.len(),
+            crate::state::MAX_PATH_DEPTH,
+        ));
+    }
+
     build_nested_state(state, &parts, &value)
 }
 
@@ -493,7 +549,8 @@ mod tests {
         let reg = InstructionRegistry::new();
         let state = State::new(vec![("x", Value::Integer(1))]);
         let instr = GenericInstruction::simple("unknown_type");
-        let result = exec_dispatch(&reg, &state, &instr);
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_dispatch(&reg, &state, &instr, &mut ctx);
         // dispatch_by_cases with unknown key, no match, no default → returns original state (no error)
         assert!(result.is_ok());
     }
@@ -1058,6 +1115,7 @@ mod tests {
         let mut reg = InstructionRegistry::new().with_default_context_ops();
         crate::primitive::register_all(&mut reg);
         crate::control::register_all(&mut reg);
+        let mut ctx = ExecCtlCtx::new();
 
         // Construct state: x=5, __exec__.instruction.type="increment",
         // __exec__.instruction.params.attr="x", __exec__.instruction.params.delta=3
@@ -1128,7 +1186,7 @@ mod tests {
             ]),
         );
 
-        let result = exec_dispatch(&reg, &state, &dispatch_instr).unwrap();
+        let result = exec_dispatch(&reg, &state, &dispatch_instr, &mut ctx).unwrap();
         // x should change from 5 to 8 (5 + 3)
         assert_eq!(result.get("x"), Some(&Value::Integer(8)));
     }
@@ -1205,6 +1263,7 @@ mod tests {
         let mut reg = InstructionRegistry::new().with_default_context_ops();
         crate::primitive::register_all(&mut reg);
         crate::control::register_all(&mut reg);
+        let mut ctx = ExecCtlCtx::new();
 
         let exec_inner = im::HashMap::from(vec![
             ("type".to_string(), Value::string("increment")),
@@ -1259,7 +1318,7 @@ mod tests {
             ]),
         );
 
-        let result = exec_dispatch(&reg, &state, &dispatch_instr).unwrap();
+        let result = exec_dispatch(&reg, &state, &dispatch_instr, &mut ctx).unwrap();
         // x should change from 5 to 8 (5 + 3), same as the $ref version
         assert_eq!(result.get("x"), Some(&Value::Integer(8)));
     }
@@ -1297,6 +1356,7 @@ mod tests {
         let mut reg = InstructionRegistry::new().with_default_context_ops();
         crate::primitive::register_all(&mut reg);
         crate::control::register_all(&mut reg);
+        let mut ctx = ExecCtlCtx::new();
 
         // Construct state: flag = Bool(true)
         let state = State::new(vec![("flag", Value::Bool(true)), ("x", Value::Integer(0))]);
@@ -1333,7 +1393,7 @@ mod tests {
             ]),
         );
 
-        let result = exec_dispatch(&reg, &state, &dispatch_instr)
+        let result = exec_dispatch(&reg, &state, &dispatch_instr, &mut ctx)
             .expect("dispatch with Bool key should not panic");
 
         // flag=true → should match the "true" case → x=1
@@ -1350,6 +1410,7 @@ mod tests {
         let mut reg = InstructionRegistry::new().with_default_context_ops();
         crate::primitive::register_all(&mut reg);
         crate::control::register_all(&mut reg);
+        let mut ctx = ExecCtlCtx::new();
 
         // Construct state: flag = Bool(false)
         let state = State::new(vec![("flag", Value::Bool(false)), ("x", Value::Integer(0))]);
@@ -1385,7 +1446,7 @@ mod tests {
             ]),
         );
 
-        let result = exec_dispatch(&reg, &state, &dispatch_instr)
+        let result = exec_dispatch(&reg, &state, &dispatch_instr, &mut ctx)
             .expect("dispatch with Bool(false) key should not panic");
 
         // flag=false → should match the "false" case → x=2
@@ -1402,6 +1463,7 @@ mod tests {
         let mut reg = InstructionRegistry::new().with_default_context_ops();
         crate::primitive::register_all(&mut reg);
         crate::control::register_all(&mut reg);
+        let mut ctx = ExecCtlCtx::new();
 
         // Construct state: level = Integer(2)
         let state = State::new(vec![("level", Value::Integer(2)), ("x", Value::Integer(0))]);
@@ -1437,7 +1499,7 @@ mod tests {
             ]),
         );
 
-        let result = exec_dispatch(&reg, &state, &dispatch_instr)
+        let result = exec_dispatch(&reg, &state, &dispatch_instr, &mut ctx)
             .expect("dispatch with Integer key should not panic");
 
         // level=2 → should match the "2" case → x=20
@@ -1454,6 +1516,7 @@ mod tests {
         let mut reg = InstructionRegistry::new().with_default_context_ops();
         crate::primitive::register_all(&mut reg);
         crate::control::register_all(&mut reg);
+        let mut ctx = ExecCtlCtx::new();
 
         // Construct state: missing_key does not exist → $ref resolves to Null
         let state = State::new(vec![("x", Value::Integer(0))]);
@@ -1482,7 +1545,7 @@ mod tests {
             ]),
         );
 
-        let result = exec_dispatch(&reg, &state, &dispatch_instr)
+        let result = exec_dispatch(&reg, &state, &dispatch_instr, &mut ctx)
             .expect("dispatch with Null key should not panic");
 
         // missing_key → Null → should match the "null" case → x=-1
@@ -1500,6 +1563,7 @@ mod tests {
         let mut reg = InstructionRegistry::new().with_default_context_ops();
         crate::primitive::register_all(&mut reg);
         crate::control::register_all(&mut reg);
+        let mut ctx = ExecCtlCtx::new();
 
         // __running=false, state_set executes but does not push advance_instruction
         let state = State::new(vec![("x", Value::Integer(0))]);
@@ -1541,7 +1605,7 @@ mod tests {
             ]),
         );
 
-        let result = exec_dispatch(&reg, &state, &dispatch_instr).unwrap();
+        let result = exec_dispatch(&reg, &state, &dispatch_instr, &mut ctx).unwrap();
         assert_eq!(result.get("x"), Some(&Value::Integer(5)));
 
         // When __running=false, the queue should not contain advance_instruction
@@ -1554,6 +1618,7 @@ mod tests {
         let mut reg = InstructionRegistry::new().with_default_context_ops();
         crate::primitive::register_all(&mut reg);
         crate::control::register_all(&mut reg);
+        let mut ctx = ExecCtlCtx::new();
 
         let state = State::new(vec![("x", Value::Integer(0))]);
         let exec_ctx = Value::Object(im::hashmap! {
@@ -1592,10 +1657,190 @@ mod tests {
             ]),
         );
 
-        let result = exec_dispatch(&reg, &state, &dispatch_instr).unwrap();
+        let result = exec_dispatch(&reg, &state, &dispatch_instr, &mut ctx).unwrap();
         assert_eq!(result.get("x"), Some(&Value::Integer(99)));
 
         let queue = get_queue(&result);
         assert_eq!(queue.len(), 0);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Constitutional dispatch architecture — "dispatch without cases"
+    // safety tests (dual-source reading).
+    //
+    // These tests pin the invariant that a `dispatch` instruction whose
+    // `params` omit `cases` cannot cause infinite recursion or a stack
+    // overflow. They cover three scenarios:
+    //
+    //   1. Main-dispatch path with no system table at all.
+    //   2. Main-dispatch path with an empty system table.
+    //   3. Main-dispatch path whose key resolves to a `dispatch` case
+    //      in the system table — the structural worst case, where the
+    //      expanded sub-instruction itself looks like a `dispatch`
+    //      call. The dual-source switch (`contains_key("cases")`) must
+    //      route the second hop into sub-dispatch with a Null cases
+    //      table, which fails to match and exits safely.
+    // ════════════════════════════════════════════════════════════════
+
+    fn make_registered_registry() -> InstructionRegistry {
+        let mut reg = InstructionRegistry::new().with_default_context_ops();
+        crate::primitive::register_all(&mut reg);
+        crate::control::register_all(&mut reg);
+        reg
+    }
+
+    #[test]
+    fn test_dispatch_without_cases_param_main_path_no_system_table() {
+        // Scenario 1: dispatch instruction omits `cases` → main-dispatch
+        // path. `__exec__.dispatch_cases` is absent → unwrap_or(empty_object).
+        // No case matches, no default → returns original state unchanged.
+        //
+        // Safety property: no recursion, no panic, no stack overflow.
+        let reg = make_registered_registry();
+        let mut ctx = ExecCtlCtx::new();
+
+        let state = State::new(vec![("x", Value::Integer(0))]);
+        // __exec__ deliberately has NO dispatch_cases / dispatch_default.
+        let exec_ctx = Value::Object(im::hashmap! {
+            "instruction".to_string() => Value::Object(im::hashmap! {
+                "type".to_string() => Value::string("dispatch"),
+                "params".to_string() => Value::empty_object(),
+            }),
+            "queue".to_string() => Value::empty_list(),
+            "__running".to_string() => Value::Bool(true),
+        });
+        let state = state.set("__exec__", exec_ctx);
+
+        // dispatch instruction WITHOUT `cases` param → main-dispatch path
+        let dispatch_instr = GenericInstruction::new(
+            "dispatch",
+            HashMap::from([(
+                "key".to_string(),
+                Value::Object(im::hashmap! {
+                    "$ref".to_string() => Value::string("__exec__.instruction.type"),
+                }),
+            )]),
+        );
+
+        let result = exec_dispatch(&reg, &state, &dispatch_instr, &mut ctx)
+            .expect("main-dispatch with no system table must exit safely");
+
+        // Business state untouched; no advance_instruction pushed.
+        assert_eq!(result.get("x"), Some(&Value::Integer(0)));
+        assert_eq!(get_queue(&result).len(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_without_cases_param_main_path_empty_system_table() {
+        // Scenario 2: main-dispatch path with an explicit empty
+        // dispatch_cases table and no default. Same safe-exit outcome.
+        let reg = make_registered_registry();
+        let mut ctx = ExecCtlCtx::new();
+
+        let state = State::new(vec![("x", Value::Integer(7))]);
+        let exec_ctx = Value::Object(im::hashmap! {
+            "instruction".to_string() => Value::Object(im::hashmap! {
+                "type".to_string() => Value::string("anything"),
+                "params".to_string() => Value::empty_object(),
+            }),
+            "queue".to_string() => Value::empty_list(),
+            "__running".to_string() => Value::Bool(true),
+            "dispatch_cases".to_string() => Value::empty_object(),
+            // dispatch_default intentionally absent
+        });
+        let state = state.set("__exec__", exec_ctx);
+
+        let dispatch_instr = GenericInstruction::new(
+            "dispatch",
+            HashMap::from([(
+                "key".to_string(),
+                Value::Object(im::hashmap! {
+                    "$ref".to_string() => Value::string("__exec__.instruction.type"),
+                }),
+            )]),
+        );
+
+        let result = exec_dispatch(&reg, &state, &dispatch_instr, &mut ctx)
+            .expect("main-dispatch with empty system table must exit safely");
+
+        assert_eq!(result.get("x"), Some(&Value::Integer(7)));
+        assert_eq!(get_queue(&result).len(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_without_cases_param_dispatch_case_no_infinite_recursion() {
+        // Scenario 3 (the structural worst case): main-dispatch path
+        // where the key resolves to a `dispatch` case in the system
+        // table. The expanded sub-instruction is itself `{type:"dispatch",
+        // params:{key:..., cases:Null}}` — `cases` is now present (Null)
+        // so the dual-source switch routes the next hop into sub-dispatch.
+        // Sub-dispatch with Null cases is not an Object → no match → no
+        // default → safe exit. Total recursion depth: exactly 2.
+        //
+        // Safety property: bounded recursion, no stack overflow, no
+        // infinite loop. This pins the dual-source switch as the
+        // constitutional recursion guard.
+        let reg = make_registered_registry();
+        let mut ctx = ExecCtlCtx::new();
+
+        // System dispatch table contains a self-referential `dispatch`
+        // case (mirrors what DispatchTableBuilder would produce).
+        let dispatch_case = Value::Object(im::hashmap! {
+            "type".to_string() => Value::string("dispatch"),
+            "params".to_string() => Value::Object(im::hashmap! {
+                "key".to_string() => Value::Object(im::hashmap! {
+                    "$ref".to_string() => Value::string("__exec__.instruction.params.key"),
+                }),
+                // cases/default resolve from the *outer* instruction's
+                // params — which omits `cases`, so they resolve to Null.
+                "cases".to_string() => Value::Object(im::hashmap! {
+                    "$ref".to_string() => Value::string("__exec__.instruction.params.cases"),
+                }),
+                "default".to_string() => Value::Object(im::hashmap! {
+                    "$ref".to_string() => Value::string("__exec__.instruction.params.default"),
+                }),
+            }),
+        });
+
+        let state = State::new(vec![("x", Value::Integer(42))]);
+        let exec_ctx = Value::Object(im::hashmap! {
+            "instruction".to_string() => Value::Object(im::hashmap! {
+                "type".to_string() => Value::string("dispatch"),
+                "params".to_string() => Value::Object(im::hashmap! {
+                    // Outer instruction's params carry only `key`; no `cases`.
+                    "key".to_string() => Value::string("dispatch"),
+                }),
+            }),
+            "queue".to_string() => Value::empty_list(),
+            "__running".to_string() => Value::Bool(true),
+            "dispatch_cases".to_string() => Value::Object(im::hashmap! {
+                "dispatch".to_string() => dispatch_case,
+            }),
+        });
+        let state = state.set("__exec__", exec_ctx);
+
+        // Outer dispatch instruction omits `cases` → main-dispatch path.
+        let outer_dispatch = GenericInstruction::new(
+            "dispatch",
+            HashMap::from([(
+                "key".to_string(),
+                Value::Object(im::hashmap! {
+                    "$ref".to_string() => Value::string("__exec__.instruction.type"),
+                }),
+            )]),
+        );
+
+        // If the dual-source guard were broken, this would recurse
+        // indefinitely and either stack-overflow or hit the registry
+        // depth limit. We expect a clean Ok with state unchanged.
+        let result = exec_dispatch(&reg, &state, &outer_dispatch, &mut ctx)
+            .expect("dispatch→dispatch hop must terminate safely via dual-source guard");
+
+        // Business state untouched by the no-op sub-dispatch.
+        assert_eq!(
+            result.get("x"),
+            Some(&Value::Integer(42)),
+            "business state must be unchanged after safe dispatch→dispatch hop"
+        );
     }
 }

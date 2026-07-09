@@ -1,0 +1,151 @@
+{
+  "$schema": "https://evorule.io/schemas/mechanism-exemption-1.0.0.json",
+  "version": "1.0.0",
+  "title": "Mechanism Exemption Registry",
+  "description": "Registry of internal mechanisms that require automatic invocation and are therefore exempt from G-13/GG-31 policy requirements. Each entry documents why the mechanism cannot be implemented as a primitive and verifies it preserves determinism.",
+  "exemptions": [
+    {
+      "id": "ME-001",
+      "name": "State Version Counter",
+      "file": "crates/tcb/src/state.rs",
+      "mechanism_type": "automatic",
+      "description": "A u64 version counter that increments automatically on every state modification (set, set_all, remove, set_path). Used for O(1) state change detection in execute_until_stable.",
+      "why_not_primitive": "Requires automatic invocation on every state modification. Implementing as a primitive would require every JSON rule that modifies state to explicitly call a bump_version primitive, which is error-prone and places burden on rule authors.",
+      "determinism_guarantee": "Same input always produces same output. Version counter is purely an internal tracking mechanism and does not affect the state data itself.",
+      "audit_impact": "None. The version counter is not recorded in the audit chain; it is only used for change detection between iterations.",
+      "performance_benefit": "O(1) state change detection instead of O(n) full state comparison.",
+      "added": "2026-07-09",
+      "review_status": "approved",
+      "reviewer": "architecture-review"
+    },
+    {
+      "id": "ME-002",
+      "name": "Persistent HashMap Structural Sharing",
+      "file": "crates/tcb/src/state.rs",
+      "mechanism_type": "automatic",
+      "description": "Use of im::HashMap for State's internal data storage, providing O(1) clone operations via structural sharing.",
+      "why_not_primitive": "This is a data structure property that works automatically. There is no 'callable' operation - the structural sharing happens transparently when clone() is called.",
+      "determinism_guarantee": "Same input always produces same output. im::HashMap maintains the same iteration order as std::HashMap for the same insertion sequence.",
+      "audit_impact": "None. Structural sharing is transparent to the audit chain.",
+      "performance_benefit": "O(1) clone operations instead of O(n) deep copies, critical for efficient state management during rule execution.",
+      "added": "2026-07-09",
+      "review_status": "approved",
+      "reviewer": "architecture-review"
+    },
+    {
+      "id": "ME-003",
+      "name": "Deterministic Iteration Order",
+      "file": "crates/tcb/src/state.rs",
+      "mechanism_type": "automatic",
+      "description": "State::keys() and State::values() return sorted keys to ensure deterministic iteration order (ER-601 compliance).",
+      "why_not_primitive": "Deterministic iteration is a fundamental requirement of the State API. Implementing this as a primitive would require every rule that iterates over state to explicitly call a sort_keys primitive, violating ER-601.",
+      "determinism_guarantee": "Keys are always returned in sorted order, ensuring deterministic iteration regardless of insertion order.",
+      "audit_impact": "None. Sorted iteration is transparent to the audit chain.",
+      "performance_benefit": "Enables deterministic rule execution, a core requirement of the TCB.",
+      "added": "2026-07-09",
+      "review_status": "approved",
+      "reviewer": "architecture-review"
+    },
+    {
+      "id": "ME-004",
+      "name": "Audit Chain HMAC Linking",
+      "file": "crates/tcb/src/audit.rs",
+      "mechanism_type": "automatic",
+      "description": "Each audit record automatically includes a hash of the previous record, forming an HMAC-linked chain.",
+      "why_not_primitive": "HMAC linking must happen automatically on every audit record creation. Implementing as a primitive would require every rule that generates audit records to explicitly call a link_audit primitive.",
+      "determinism_guarantee": "Same sequence of operations produces the same hash chain.",
+      "audit_impact": "Directly impacts the audit chain format. The HMAC link is part of every audit record.",
+      "performance_benefit": "Ensures tamper-proof audit records - modifying any record breaks the hash chain.",
+      "added": "2026-07-09",
+      "review_status": "approved",
+      "reviewer": "architecture-review"
+    },
+    {
+      "id": "ME-005",
+      "name": "Registry Freeze Protection",
+      "file": "crates/governance-core/src/engine/equation.rs",
+      "mechanism_type": "automatic",
+      "description": "Automatic check on every primitive registry modification attempt to ensure the registry is not frozen.",
+      "why_not_primitive": "Freeze protection must be enforced at the engine level, not at the rule level. Rules should not be able to bypass freeze checks.",
+      "determinism_guarantee": "Same input produces same output. Freeze checks only prevent modifications; they don't affect execution.",
+      "audit_impact": "None. Freeze checks are internal validation.",
+      "performance_benefit": "Prevents runtime modification of the instruction registry, ensuring consistent execution.",
+      "added": "2026-07-09",
+      "review_status": "approved",
+      "reviewer": "architecture-review"
+    },
+    {
+      "id": "ME-006",
+      "name": "Instruction Queue FIFO Ordering",
+      "file": "crates/tcb/src/exec_context.rs",
+      "mechanism_type": "automatic",
+      "description": "Instruction queue maintains strict FIFO ordering for deterministic execution.",
+      "why_not_primitive": "Queue ordering is a fundamental requirement of the execution model. There is no 'callable' operation - the ordering is enforced automatically.",
+      "determinism_guarantee": "Instructions are always processed in FIFO order, ensuring deterministic execution.",
+      "audit_impact": "None. Queue ordering is transparent to the audit chain.",
+      "performance_benefit": "Enables deterministic execution flow, a core requirement of the TCB.",
+      "added": "2026-07-09",
+      "review_status": "approved",
+      "reviewer": "architecture-review"
+    },
+    {
+      "id": "ME-007",
+      "name": "Dispatch Table Auto-Projection",
+      "file": "crates/governance-core/src/engine/dispatch_table.rs",
+      "mechanism_type": "automatic",
+      "description": "Automatically builds the dispatch cases table from the InstructionRegistry at startup.",
+      "why_not_primitive": "The dispatch table must be built once at startup, not on every rule invocation. It is a configuration-time operation, not a runtime operation.",
+      "determinism_guarantee": "Same registry produces the same dispatch table.",
+      "audit_impact": "The dispatch table hash is recorded in audit records for version tracking.",
+      "performance_benefit": "Eliminates manual maintenance of the dispatch cases table in JSON.",
+      "added": "2026-07-09",
+      "review_status": "approved",
+      "reviewer": "architecture-review"
+    },
+    {
+      "id": "ME-008",
+      "name": "While Loop Safety Valve",
+      "file": "crates/tcb/src/control/while_loop.rs",
+      "mechanism_type": "automatic",
+      "description": "Automatic max_steps limit to prevent infinite loops.",
+      "why_not_primitive": "The safety valve must be enforced at the while_loop level, not at the rule level. It is a mechanism-level protection, not a policy decision.",
+      "determinism_guarantee": "Same input produces same output, with early termination if max_steps is reached.",
+      "audit_impact": "None. The safety valve is transparent to the audit chain.",
+      "performance_benefit": "Prevents infinite loops due to malformed rules.",
+      "added": "2026-07-09",
+      "review_status": "approved",
+      "reviewer": "architecture-review"
+    }
+  ],
+  "review_process": {
+    "description": "All mechanism exemptions must be reviewed and approved by the architecture review team before being added to this registry.",
+    "steps": [
+      {
+        "step": 1,
+        "title": "Submit Proposal",
+        "description": "Create a draft entry with all required fields and a clear justification for why the mechanism cannot be implemented as a primitive."
+      },
+      {
+        "step": 2,
+        "title": "Determinism Review",
+        "description": "Verify the mechanism preserves determinism (same input → same output)."
+      },
+      {
+        "step": 3,
+        "title": "Policy Review",
+        "description": "Verify the mechanism does not encode any business policy or configurable thresholds."
+      },
+      {
+        "step": 4,
+        "title": "Audit Review",
+        "description": "Verify the mechanism does not affect audit chain transparency."
+      },
+      {
+        "step": 5,
+        "title": "Approval",
+        "description": "Approved by architecture review team and added to the registry."
+      }
+    ]
+  },
+  "schema_version": "1.0.0"
+}

@@ -85,6 +85,19 @@ pub struct ExecContext {
     pub drain_meta_trace: bool,
     /// Dispatch table (cases table).
     pub dispatch_cases: Value,
+    /// Dispatch default case (constitutional dispatch architecture v1.1).
+    ///
+    /// Injected by governance-core `TheEquation::build_dispatch_table()`.
+    /// Must survive `from_value`/`to_value` roundtrips so that dispatch
+    /// primitive can read it on every iteration, not just the first.
+    pub dispatch_default: Value,
+    /// Dispatch table version hash (constitutional dispatch architecture v1.1).
+    ///
+    /// 8-char SHA-256 prefix, injected by governance-core. Read by
+    /// `audit_ops::trace_step` to append `@<version>` to `change_summary`
+    /// (ER-605 Exception #2). Must survive roundtrips or audit chain loses
+    /// dispatch-table version traceability.
+    pub dispatch_table_version: Value,
 
     // ── Dynamic fields (written by TCB at runtime) ──
     /// Last dispatch before/after hashes (P0-A addition).
@@ -110,6 +123,8 @@ impl ExecContext {
             audit_on: true,
             drain_meta_trace: false,
             dispatch_cases: Value::empty_object(),
+            dispatch_default: Value::empty_object(),
+            dispatch_table_version: Value::string(""),
             last_dispatch_hashes: Value::Null,
             trace_source: Value::Null,
             terminated_by_max_steps: false,
@@ -158,6 +173,14 @@ impl ExecContext {
             .get("dispatch_cases")
             .cloned()
             .unwrap_or(Value::empty_object());
+        let dispatch_default = val
+            .get("dispatch_default")
+            .cloned()
+            .unwrap_or(Value::empty_object());
+        let dispatch_table_version = val
+            .get("dispatch_table_version")
+            .cloned()
+            .unwrap_or(Value::string(""));
         let last_dispatch_hashes = val
             .get("last_dispatch_hashes")
             .cloned()
@@ -179,6 +202,8 @@ impl ExecContext {
             audit_on,
             drain_meta_trace,
             dispatch_cases,
+            dispatch_default,
+            dispatch_table_version,
             last_dispatch_hashes,
             trace_source,
             terminated_by_max_steps,
@@ -213,6 +238,14 @@ impl ExecContext {
                 Value::Bool(self.drain_meta_trace),
             ),
             ("dispatch_cases".to_string(), self.dispatch_cases.clone()),
+            (
+                "dispatch_default".to_string(),
+                self.dispatch_default.clone(),
+            ),
+            (
+                "dispatch_table_version".to_string(),
+                self.dispatch_table_version.clone(),
+            ),
             (
                 "last_dispatch_hashes".to_string(),
                 self.last_dispatch_hashes.clone(),
@@ -438,6 +471,14 @@ impl ExecContext {
             "audit_on" => self.with_audit_on(value.as_bool().unwrap_or(true)),
             "drain_meta_trace" => self.with_drain_meta_trace(value.as_bool().unwrap_or(false)),
             "dispatch_cases" => self.with_dispatch_cases(value),
+            "dispatch_default" => Self {
+                dispatch_default: value,
+                ..self.clone()
+            },
+            "dispatch_table_version" => Self {
+                dispatch_table_version: value,
+                ..self.clone()
+            },
             "last_dispatch_hashes" => Self {
                 last_dispatch_hashes: value,
                 ..self.clone()

@@ -247,11 +247,69 @@ Specification Section	Role of This Standard
 §7.1 Determinism is not "try your best", it's "must achieve"	Provides criteria for "how much" must be achieved
 §7.2 Alternatives to non-deterministic APIs	Provides basis for judging "why the alternative is deterministic"
 §7.3 Determinism boundary	Clearly defines where the "boundary" lies
+
+---
+
+## 5.5. Constitutional Dispatch Table Determinism (v1.1+, 2026-07-05)
+
+In v1.1, the dispatch table is no longer a static JSON file; it is **built at startup** by `governance-core::DispatchTableBuilder` from the `InstructionRegistry` + `register_core_aliases()` + `set_default()`. This section specifies the determinism contract for the new dispatch path — the same four-layer analysis as §1–§3, applied to the new architecture.
+
+### 5.5.1 Three injected fields and their determinism
+
+| Field | L1 | L2 | L3 | Note |
+|-------|----|----|----|------|
+| `dispatch_cases` | ✅ Deterministic | ✅ Deterministic | ✅ Deterministic | Built by iterating `InstructionRegistry` (HashMap) — order canonicalized via BTreeMap insertion + canonical JSON serialization with stable key ordering |
+| `dispatch_default` | ✅ Deterministic | ✅ Deterministic | ✅ Deterministic | Single object, set by `DispatchTableBuilder::set_default()`, content-hashable |
+| `dispatch_table_version` | ✅ Deterministic (SHA-256) | ✅ Deterministic | ✅ Deterministic | SHA-256 of canonical JSON serialization of `(dispatch_cases + dispatch_default)` — same algorithm as `content_hash`, just over a different payload |
+
+**Conclusion**: All three fields satisfy L1~L3. The dispatch table itself is L1 deterministic — the constitutional architecture preserves the L1 commitment of the TCB, even though the dispatch table now moves to runtime construction.
+
+### 5.5.2 Audit record format `[tbl:<hash>]`
+
+Since v1.1, `primitive/audit_ops.rs::trace_step` appends `[tbl:<hash>]` to `change_summary`. This is the **ER-605 Exception #2** introduced by the v1.1 constitutional dispatch architecture:
+
+```text
+change_summary = "<previous_text> [tbl:<8-char-prefix-of-dispatch_table_version>]"
+```
+
+| Layer | Status | Note |
+|-------|--------|------|
+| L1 | ✅ Deterministic | Format is fixed-string (` [tbl:` + 8 hex chars + `]`) + SHA-256 prefix, no randomness, no wall-clock, no UB |
+| L2 | ✅ Deterministic | `sha2` crate version locked (`=0.10.x`, see TCB_Governance_Contract.md §5) |
+| L3 | ✅ Deterministic | SHA-256 cross-platform consistent (FIPS 180-4) |
+| L4 | ⚠️ Needs declaration | Cross-language audit format requires documented declaration if used |
+
+**Conclusion**: `[tbl:<hash>]` is L1 deterministic. The 8-character prefix provides 16M hash space (32 bits), sufficient for collision avoidance in audit logs within a single trace.
+
+### 5.5.3 Why this matters for audit chain integrity
+
+**Without `[tbl:<hash>]`**: An auditor cannot tell whether the dispatch behavior at audit record N matches dispatch behavior at record M. A bug fix to `register_core_aliases` would silently change behavior of all subsequent audit records, with no traceability.
+
+**With `[tbl:<hash>]`**: Each audit record carries the dispatch-table version that was in effect. A regression can be traced to a specific `dispatch_table_version`. Forward-compatible with governance-core's `fbd4844` ER-601 HMAC verification.
+
+### 5.5.4 Compositional determinism implication
+
+§1 rule: "The L1 status of a control-flow primitive = `min(own L1, L1 of all invocable instructions)`." With v1.1:
+
+- `while_loop`'s own algorithm: L1 ✅ (unchanged).
+- Each invocable instruction: L1 ✅ (registry unchanged; only the dispatch mechanism became more traceable).
+- **Net effect**: `while_loop`'s L1 status remains "conditionally deterministic" — the conditionality is unchanged.
+
+### 5.5.5 Cross-references
+
+- **Architecture (canonical)**: see [`docs/spec/en-US/TCB_Governance_Contract.md`](TCB_Governance_Contract.md) v1.1 §1 + §9 for the TCB-side contract.
+- **TCB implementation**: `evorule-tcb/crates/tcb/src/primitive/audit_ops.rs` (`trace_step`) + `crates/tcb/src/control/dispatch.rs` (dual-source reading, ER-605 Exception #1)
+- **Governance implementation**: governance-core `DispatchTableBuilder::content_hash` (builds `(dispatch_cases, dispatch_default, dispatch_table_version)` at startup from `InstructionRegistry`).
+- **Correction report**: see `CHANGELOG.md` and `docs/developer-guide/design-decisions/` for the dispatch-case `$ref` vs `$pass` semantics correction (2026-07-05).
+
+---
+
 6. Version History
 Version	Date	Notes
 1.0	2026-06-30	Initial release. Based on team self-calibration results.
 1.1	2026-06-30	Post-code-review corrections: ① Corrected Value::Float L3 assessment (IEEE 754 basic arithmetic cross-platform consistent, not "possible different rounding"); ② Added DeterministicRNG case identifying real L3 as usize 32-bit truncation defect; ③ Corrected Domain::Matches L1 assessment (regex has no unified specification, "implementation-determined" not "specification-determined"); ④ Added "Compositional Determinism" section and judgment Step 1.5; ⑤ Added "Input Contract" section and judgment Step 0; ⑥ Clarified L4 as optional enhancement target, not TCB default commitment; ⑦ Verified detect_conflicts output order determinism (im::Vector index traversal + sequential push).
 1.2	2026-06-30	Code fix sync: DeterministicRNG::choice/shuffle as usize truncation defect fixed in code (changed to u64 domain modulo). L3 status updated from ⚠️ "needs fix" to ✅ "fixed". 517 tests all pass, no regression.
+1.3	2026-07-05	**Constitutional dispatch architecture integration** (v1.1). Added §5.5 covering L1~L3 determinism of `dispatch_cases` / `dispatch_default` / `dispatch_table_version`; `[tbl:<hash>]` audit record format (ER-605 Exception #2) L1~L3 deterministic; audit-chain integrity forward-compatible with `fbd4844` ER-601 HMAC verification. 562 tests pass.
 End of Document
 
 This standard aims to end ambiguous debates about "determinism." It is not intended to add process burden, but to ensure team discussions precisely target specific issues, avoiding time wasted on vague concepts.

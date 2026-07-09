@@ -57,6 +57,16 @@ use crate::state::State;
 use crate::value::Value;
 
 /// Relational operators.
+///
+/// # Moved Out of TCB
+///
+/// The following operators were moved to the Governance layer because they perform
+/// text processing, which violates the TCB's JSON-structured-data-only design principle:
+/// - `Matches` / `NotMatches` (regex matching)
+/// - `StartsWith` / `EndsWith` (string prefix/suffix matching)
+/// - String substring `Contains` / `NotContains`
+///
+/// In TCB, `Contains` / `NotContains` only work with list elements (not strings).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelOp {
     /// Equal to
@@ -71,11 +81,11 @@ pub enum RelOp {
     Lt,
     /// Less than or equal to
     Le,
-    /// Contains (substring or element check)
+    /// Contains (list element check only)
     Contains,
     /// Does not contain
     NotContains,
-    /// In a set
+    /// In a set (list membership only)
     In,
     /// Not in a set
     NotIn,
@@ -83,14 +93,6 @@ pub enum RelOp {
     Between,
     /// Not in a numeric range
     NotBetween,
-    /// Regular expression match
-    Matches,
-    /// Regular expression does not match
-    NotMatches,
-    /// String starts with
-    StartsWith,
-    /// String ends with
-    EndsWith,
     /// Attribute exists
     Exists,
     /// Attribute does not exist
@@ -113,10 +115,6 @@ impl RelOp {
             "not_in" => Some(Self::NotIn),
             "between" => Some(Self::Between),
             "not_between" => Some(Self::NotBetween),
-            "matches" | "regex" => Some(Self::Matches),
-            "not_matches" | "not_regex" => Some(Self::NotMatches),
-            "starts_with" | "startswith" => Some(Self::StartsWith),
-            "ends_with" | "endswith" => Some(Self::EndsWith),
             "exists" => Some(Self::Exists),
             "not_exists" => Some(Self::NotExists),
             _ => None,
@@ -138,10 +136,6 @@ impl RelOp {
             Self::NotIn => "not_in",
             Self::Between => "between",
             Self::NotBetween => "not_between",
-            Self::Matches => "matches",
-            Self::NotMatches => "not_matches",
-            Self::StartsWith => "starts_with",
-            Self::EndsWith => "ends_with",
             Self::Exists => "exists",
             Self::NotExists => "not_exists",
         }
@@ -178,10 +172,6 @@ impl RelOp {
             Self::NotIn => !value_in(actual, expected),
             Self::Between => value_between(actual, expected),
             Self::NotBetween => !value_between(actual, expected),
-            Self::Matches => value_matches(actual, expected),
-            Self::NotMatches => !value_matches(actual, expected),
-            Self::StartsWith => value_starts_with(actual, expected),
-            Self::EndsWith => value_ends_with(actual, expected),
             // Defensive fallback: Exists/NotExists are short-circuited in
             // `Domain::contains`. If they reach here due to a contract
             // violation, return false rather than panicking to preserve TCB
@@ -217,9 +207,18 @@ pub enum Domain {
     Empty,
 }
 
+const MAX_DOMAIN_DEPTH: usize = 128;
+
 impl Domain {
     /// Determine whether the state satisfies this domain.
     pub fn contains(&self, state: &State) -> bool {
+        self.contains_inner(state, 0)
+    }
+
+    fn contains_inner(&self, state: &State, depth: usize) -> bool {
+        if depth > MAX_DOMAIN_DEPTH {
+            return false;
+        }
         match self {
             Self::Atom {
                 attribute,
@@ -243,9 +242,9 @@ impl Domain {
                     },
                 }
             }
-            Self::And(domains) => domains.iter().all(|d| d.contains(state)),
-            Self::Or(domains) => domains.iter().any(|d| d.contains(state)),
-            Self::Not(inner) => !inner.contains(state),
+            Self::And(domains) => domains.iter().all(|d| d.contains_inner(state, depth + 1)),
+            Self::Or(domains) => domains.iter().any(|d| d.contains_inner(state, depth + 1)),
+            Self::Not(inner) => !inner.contains_inner(state, depth + 1),
             Self::Instruction(instr_type) => {
                 // Aligns with v2: check __exec__.instruction.type
                 match state
@@ -535,26 +534,24 @@ fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     }
 }
 
-/// Check whether `actual` contains `expected` (substring or list element).
+/// Check whether `actual` contains `expected` (list element check only).
+///
+/// Note: String substring contains was moved to the Governance layer as
+/// `contains_substring` primitive. In TCB, `contains` only works with lists.
 fn value_contains(actual: &Value, expected: &Value) -> bool {
     match actual {
-        Value::String(s) => match expected {
-            Value::String(sub) => s.contains(sub.as_str()),
-            _ => false,
-        },
         Value::List(v) => v.iter().any(|item| values_equal(item, expected)),
         _ => false,
     }
 }
 
-/// Check whether `actual` is in the `expected` set.
+/// Check whether `actual` is in the `expected` set (list membership only).
+///
+/// Note: String substring membership was moved to the Governance layer.
+/// In TCB, `in` only works with lists.
 fn value_in(actual: &Value, expected: &Value) -> bool {
     match expected {
         Value::List(v) => v.iter().any(|item| values_equal(item, actual)),
-        Value::String(s) => match actual {
-            Value::String(a) => s.contains(a.as_str()),
-            _ => false,
-        },
         _ => false,
     }
 }
@@ -585,54 +582,6 @@ fn value_between(actual: &Value, expected: &Value) -> bool {
     };
 
     actual_num >= min && actual_num <= max
-}
-
-/// Check whether a string matches a regular expression.
-fn value_matches(actual: &Value, pattern: &Value) -> bool {
-    let s = match actual.as_str() {
-        Some(s) => s,
-        None => return false,
-    };
-
-    let pattern_str = match pattern.as_str() {
-        Some(p) => p,
-        None => return false,
-    };
-
-    match regex::Regex::new(pattern_str) {
-        Ok(re) => re.is_match(s),
-        Err(_) => false,
-    }
-}
-
-/// Check whether a string starts with the given prefix.
-fn value_starts_with(actual: &Value, prefix: &Value) -> bool {
-    let s = match actual.as_str() {
-        Some(s) => s,
-        None => return false,
-    };
-
-    let p = match prefix.as_str() {
-        Some(p) => p,
-        None => return false,
-    };
-
-    s.starts_with(p)
-}
-
-/// Check whether a string ends with the given suffix.
-fn value_ends_with(actual: &Value, suffix: &Value) -> bool {
-    let s = match actual.as_str() {
-        Some(s) => s,
-        None => return false,
-    };
-
-    let suf = match suffix.as_str() {
-        Some(suf) => suf,
-        None => return false,
-    };
-
-    s.ends_with(suf)
 }
 
 /// Parse a list of domains from a Value object.
@@ -864,11 +813,14 @@ mod tests {
 
     #[test]
     fn test_contains_operator() {
-        let state = State::new(vec![("msg", Value::string("hello world"))]);
+        let state = State::new(vec![(
+            "tags",
+            Value::list(vec![Value::string("admin"), Value::string("user")]),
+        )]);
         let domain = Domain::Atom {
-            attribute: "msg".to_string(),
+            attribute: "tags".to_string(),
             op: RelOp::Contains,
-            value: Value::string("world"),
+            value: Value::string("admin"),
         };
         assert!(domain.contains(&state));
     }
@@ -945,106 +897,6 @@ mod tests {
     }
 
     #[test]
-    fn test_matches_true() {
-        let state = State::new(vec![("email", Value::string("test@example.com"))]);
-        let domain = Domain::Atom {
-            attribute: "email".to_string(),
-            op: RelOp::Matches,
-            value: Value::string(r".+@example\.com$"),
-        };
-        assert!(domain.contains(&state));
-    }
-
-    #[test]
-    fn test_matches_false() {
-        let state = State::new(vec![("email", Value::string("invalid-email"))]);
-        let domain = Domain::Atom {
-            attribute: "email".to_string(),
-            op: RelOp::Matches,
-            value: Value::string(r".+@example\.com$"),
-        };
-        assert!(!domain.contains(&state));
-    }
-
-    #[test]
-    fn test_matches_invalid_regex() {
-        // Invalid regex should return false
-        let state = State::new(vec![("s", Value::string("test"))]);
-        let domain = Domain::Atom {
-            attribute: "s".to_string(),
-            op: RelOp::Matches,
-            value: Value::string(r"[invalid"), // invalid regex
-        };
-        assert!(!domain.contains(&state));
-    }
-
-    #[test]
-    fn test_not_matches_true() {
-        let state = State::new(vec![("email", Value::string("invalid-email"))]);
-        let domain = Domain::Atom {
-            attribute: "email".to_string(),
-            op: RelOp::NotMatches,
-            value: Value::string(r".+@example\.com$"),
-        };
-        assert!(domain.contains(&state));
-    }
-
-    #[test]
-    fn test_not_matches_false() {
-        let state = State::new(vec![("email", Value::string("test@example.com"))]);
-        let domain = Domain::Atom {
-            attribute: "email".to_string(),
-            op: RelOp::NotMatches,
-            value: Value::string(r".+@example\.com$"),
-        };
-        assert!(!domain.contains(&state));
-    }
-
-    #[test]
-    fn test_starts_with_true() {
-        let state = State::new(vec![("name", Value::string("HelloWorld"))]);
-        let domain = Domain::Atom {
-            attribute: "name".to_string(),
-            op: RelOp::StartsWith,
-            value: Value::string("Hello"),
-        };
-        assert!(domain.contains(&state));
-    }
-
-    #[test]
-    fn test_starts_with_false() {
-        let state = State::new(vec![("name", Value::string("HiWorld"))]);
-        let domain = Domain::Atom {
-            attribute: "name".to_string(),
-            op: RelOp::StartsWith,
-            value: Value::string("Hello"),
-        };
-        assert!(!domain.contains(&state));
-    }
-
-    #[test]
-    fn test_ends_with_true() {
-        let state = State::new(vec![("name", Value::string("HelloWorld"))]);
-        let domain = Domain::Atom {
-            attribute: "name".to_string(),
-            op: RelOp::EndsWith,
-            value: Value::string("World"),
-        };
-        assert!(domain.contains(&state));
-    }
-
-    #[test]
-    fn test_ends_with_false() {
-        let state = State::new(vec![("name", Value::string("HelloPlanet"))]);
-        let domain = Domain::Atom {
-            attribute: "name".to_string(),
-            op: RelOp::EndsWith,
-            value: Value::string("World"),
-        };
-        assert!(!domain.contains(&state));
-    }
-
-    #[test]
     fn test_in_operator() {
         let state = State::new(vec![("color", Value::string("red"))]);
         let domain = Domain::Atom {
@@ -1104,23 +956,11 @@ mod tests {
             ("name", Value::string("John")),
             ("email", Value::string("john@example.com")),
         ]);
-        let domain = Domain::And(vec![
-            Domain::Atom {
-                attribute: "age".to_string(),
-                op: RelOp::Between,
-                value: Value::list(vec![Value::Integer(18), Value::Integer(100)]),
-            },
-            Domain::Atom {
-                attribute: "name".to_string(),
-                op: RelOp::StartsWith,
-                value: Value::string("Jo"),
-            },
-            Domain::Atom {
-                attribute: "email".to_string(),
-                op: RelOp::Matches,
-                value: Value::string(r".+@example\.com$"),
-            },
-        ]);
+        let domain = Domain::And(vec![Domain::Atom {
+            attribute: "age".to_string(),
+            op: RelOp::Between,
+            value: Value::list(vec![Value::Integer(18), Value::Integer(100)]),
+        }]);
         assert!(domain.contains(&state));
     }
 
@@ -1249,22 +1089,6 @@ mod tests {
         // not_contains / lacks
         assert_eq!(RelOp::parse("lacks"), Some(RelOp::NotContains));
         assert_eq!(RelOp::parse("not_contains"), Some(RelOp::NotContains));
-
-        // matches / regex
-        assert_eq!(RelOp::parse("regex"), Some(RelOp::Matches));
-        assert_eq!(RelOp::parse("matches"), Some(RelOp::Matches));
-
-        // not_matches / not_regex
-        assert_eq!(RelOp::parse("not_regex"), Some(RelOp::NotMatches));
-        assert_eq!(RelOp::parse("not_matches"), Some(RelOp::NotMatches));
-
-        // starts_with / startswith
-        assert_eq!(RelOp::parse("startswith"), Some(RelOp::StartsWith));
-        assert_eq!(RelOp::parse("starts_with"), Some(RelOp::StartsWith));
-
-        // ends_with / endswith
-        assert_eq!(RelOp::parse("endswith"), Some(RelOp::EndsWith));
-        assert_eq!(RelOp::parse("ends_with"), Some(RelOp::EndsWith));
     }
 
     #[test]
@@ -1283,10 +1107,6 @@ mod tests {
             (RelOp::NotIn, "not_in"),
             (RelOp::Between, "between"),
             (RelOp::NotBetween, "not_between"),
-            (RelOp::Matches, "matches"),
-            (RelOp::NotMatches, "not_matches"),
-            (RelOp::StartsWith, "starts_with"),
-            (RelOp::EndsWith, "ends_with"),
         ];
 
         for (op, expected_str) in variants {
@@ -1526,20 +1346,6 @@ mod tests {
     }
 
     #[test]
-    fn test_relop_aliases_startswith_endswith() {
-        // starts_with and ends_with aliases
-        assert_eq!(RelOp::parse("startswith"), Some(RelOp::StartsWith));
-        assert_eq!(RelOp::parse("endswith"), Some(RelOp::EndsWith));
-    }
-
-    #[test]
-    fn test_relop_aliases_regex() {
-        // matches alias: regex
-        assert_eq!(RelOp::parse("regex"), Some(RelOp::Matches));
-        assert_eq!(RelOp::parse("not_regex"), Some(RelOp::NotMatches));
-    }
-
-    #[test]
     fn test_atom_missing_attr_eq_vs_ne() {
         // Attribute missing: Eq → false, Ne → true
         let state = State::new(vec![("x", Value::Integer(5))]);
@@ -1584,52 +1390,6 @@ mod tests {
         assert!(result.is_ok());
         let state = State::new(vec![("temp", Value::float(37.0))]);
         assert!(result.unwrap().contains(&state));
-    }
-
-    #[test]
-    fn test_matches_with_valid_regex() {
-        // matches with a valid regex
-        let state = State::new(vec![("email", Value::string("user@example.com"))]);
-        let domain = Domain::Atom {
-            attribute: "email".to_string(),
-            op: RelOp::Matches,
-            value: Value::string(r".+@.+\..+"),
-        };
-        assert!(domain.contains(&state));
-    }
-
-    #[test]
-    fn test_matches_with_invalid_regex_returns_false() {
-        // matches with invalid regex → returns false (does not panic)
-        let state = State::new(vec![("s", Value::string("test"))]);
-        let domain = Domain::Atom {
-            attribute: "s".to_string(),
-            op: RelOp::Matches,
-            value: Value::string(r"[invalid("), // invalid regex
-        };
-        assert!(!domain.contains(&state)); // does not panic, returns false
-    }
-
-    #[test]
-    fn test_starts_with_true_url_https() {
-        let state = State::new(vec![("url", Value::string("https://example.com"))]);
-        let domain = Domain::Atom {
-            attribute: "url".to_string(),
-            op: RelOp::StartsWith,
-            value: Value::string("https://"),
-        };
-        assert!(domain.contains(&state));
-    }
-
-    #[test]
-    fn test_ends_with_true_csv() {
-        let state = State::new(vec![("file", Value::string("data.csv"))]);
-        let domain = Domain::Atom {
-            attribute: "file".to_string(),
-            op: RelOp::EndsWith,
-            value: Value::string(".csv"),
-        };
-        assert!(domain.contains(&state));
     }
 
     #[test]

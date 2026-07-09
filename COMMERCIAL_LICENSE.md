@@ -75,7 +75,7 @@ following restrictions:
   interoperability rights under the EU Software Directive).
 - **No trademark use without separate license**: this
   Agreement does not grant any right to use the trademarks
-  associated with evorule-tcb (which include 元则 and EvoRule
+  associated with evorule-tcb (which include Yuanze and EvoRule
   as textual components; see TRADEMARK.md), except as permitted
   under TRADEMARK.md or under a separate trademark license.
 - **Compliance with export laws**: Licensee is responsible

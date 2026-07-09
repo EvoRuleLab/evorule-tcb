@@ -75,10 +75,11 @@
 use crate::audit::{AuditChainState, AuditRecord, ExecutionResult, DEFAULT_HMAC_KEY};
 use crate::deterministic::content_hash;
 use crate::error::EvoRuleError;
+use crate::exec_ctl_ctx::ExecCtlCtx;
 use crate::instruction::registry::InstructionRegistry;
 use crate::rule::GenericInstruction;
 use crate::state::State;
-use crate::value::Value;
+use crate::value::{ImMapExt, Value};
 
 /// Register audit primitives.
 pub fn register(reg: &mut InstructionRegistry) {
@@ -115,6 +116,7 @@ pub(crate) fn exec_trace_step(
     _reg: &crate::instruction::registry::InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     // Check the audit_on switch (injected into __exec__ by evaluate())
     let audit_on = state
@@ -158,9 +160,29 @@ pub(crate) fn exec_trace_step(
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    // Construct change_summary: contains label and instruction_type
-    let change_summary = match instruction_type {
-        Some(ref itype) if itype != label => Some(format!("[{itype}] {label}")),
+    // Read the dispatch-table version hash from __exec__.dispatch_table_version.
+    // The constitutional dispatch architecture injects this short hash so the
+    // audit chain can pin which dispatch-table version produced a given step.
+    // Main-dispatch steps carry the version; sub-dispatch steps (where the
+    // caller supplied an inline `cases`) do not — by convention we omit it
+    // there, since the sub-dispatch table is not the system table.
+    let dispatch_table_version = state
+        .get("__exec__")
+        .and_then(|v| v.get("dispatch_table_version"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    // Construct change_summary: contains label and instruction_type, plus
+    // the dispatch-table version tag when available.
+    //
+    // Format: `[<itype>] <label> @<version>` (or `[<itype>] <label>` /
+    // `<label>` when fields are missing).
+    let change_summary = match (instruction_type.as_ref(), dispatch_table_version.as_ref()) {
+        (Some(itype), Some(version)) if itype != label => {
+            Some(format!("[{itype}] {label} @{version}"))
+        }
+        (Some(itype), None) if itype != label => Some(format!("[{itype}] {label}")),
+        (None, Some(version)) => Some(format!("{label} @{version}")),
         _ => Some(label.to_string()),
     };
 
@@ -194,22 +216,19 @@ pub(crate) fn exec_trace_step(
             .to_string();
         (before, after)
     } else {
-        // Fallback: compute the current state hash (legacy behavior, before == after)
         let mut snapshot = im::HashMap::new();
-        for (k, v) in state.data().iter() {
+        for (k, v) in state.data().iter_sorted() {
             if k != "__exec__" && k != "__audit_chain" && k != "__parallel_provenance__" {
                 snapshot.insert(k.clone(), v.clone());
             }
         }
         let snapshot_value = Value::Object(snapshot);
-        // content_hash takes &[Value] (owned), so clone is required despite clippy suggestion.
-        #[allow(clippy::cloned_ref_to_slice_refs)]
         let state_hash = content_hash(&[snapshot_value]);
         (state_hash.clone(), state_hash)
     };
 
     // Deterministic derivation: use LogicalClock tick instead of wall-clock timestamp
-    let tick = chain_state.next_tick();
+    let tick = ctx.next_tick();
     let previous_hash = chain_state.latest_hash.clone();
 
     // Deterministically derive ID and nonce
@@ -262,7 +281,8 @@ mod tests {
         params.insert("rule_id".to_string(), Value::string("test.rule"));
         let instr = GenericInstruction::new("trace_step", params);
 
-        let result = exec_trace_step(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_trace_step(&reg, &state, &instr, &mut ctx).unwrap();
         let chain_val = result.get("__audit_chain").cloned().unwrap();
         let chain_state = AuditChainState::from_value(&chain_val).unwrap();
 
@@ -279,13 +299,14 @@ mod tests {
     fn test_trace_step_multiple() {
         let reg = crate::instruction::registry::InstructionRegistry::new();
         let mut state = State::new(vec![("x", Value::Integer(1))]);
+        let mut ctx = ExecCtlCtx::new();
 
         for i in 0..3 {
             let mut params = HashMap::new();
             params.insert("label".to_string(), Value::string(format!("step_{}", i)));
             params.insert("rule_id".to_string(), Value::string("test.rule"));
             let instr = GenericInstruction::new("trace_step", params);
-            state = exec_trace_step(&reg, &state, &instr).unwrap();
+            state = exec_trace_step(&reg, &state, &instr, &mut ctx).unwrap();
         }
 
         let chain_val = state.get("__audit_chain").cloned().unwrap();
@@ -302,6 +323,7 @@ mod tests {
     fn test_trace_step_chain_validation() {
         let reg = crate::instruction::registry::InstructionRegistry::new();
         let mut state = State::new(vec![("counter", Value::Integer(0))]);
+        let mut ctx = ExecCtlCtx::new();
 
         // Add multiple records
         for i in 0..5 {
@@ -312,7 +334,7 @@ mod tests {
             );
             params.insert("rule_id".to_string(), Value::string("test.increment"));
             let instr = GenericInstruction::new("trace_step", params);
-            state = exec_trace_step(&reg, &state, &instr).unwrap();
+            state = exec_trace_step(&reg, &state, &instr, &mut ctx).unwrap();
         }
 
         // Verify the chain structure
@@ -347,8 +369,10 @@ mod tests {
         params.insert("rule_id".to_string(), Value::string("test.rule"));
         let instr = GenericInstruction::new("trace_step", params);
 
-        let result1 = exec_trace_step(&reg, &state1, &instr).unwrap();
-        let result2 = exec_trace_step(&reg, &state2, &instr).unwrap();
+        let mut ctx1 = ExecCtlCtx::new();
+        let result1 = exec_trace_step(&reg, &state1, &instr, &mut ctx1).unwrap();
+        let mut ctx2 = ExecCtlCtx::new();
+        let result2 = exec_trace_step(&reg, &state2, &instr, &mut ctx2).unwrap();
 
         let chain1 = result1.get("__audit_chain").cloned().unwrap();
         let chain2 = result2.get("__audit_chain").cloned().unwrap();
@@ -392,7 +416,8 @@ mod tests {
         params.insert("rule_id".to_string(), Value::string("increment"));
         let instr = GenericInstruction::new("trace_step", params);
 
-        let result = exec_trace_step(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_trace_step(&reg, &state, &instr, &mut ctx).unwrap();
         let chain_val = result.get("__audit_chain").cloned().unwrap();
         let chain_state = AuditChainState::from_value(&chain_val).unwrap();
 
@@ -428,7 +453,8 @@ mod tests {
         params.insert("rule_id".to_string(), Value::string("noop"));
         let instr = GenericInstruction::new("trace_step", params);
 
-        let result = exec_trace_step(&reg, &state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = exec_trace_step(&reg, &state, &instr, &mut ctx).unwrap();
         let chain_val = result.get("__audit_chain").cloned().unwrap();
         let chain_state = AuditChainState::from_value(&chain_val).unwrap();
 
@@ -469,8 +495,10 @@ mod tests {
         params.insert("rule_id".to_string(), Value::string("test"));
         let instr = GenericInstruction::new("trace_step", params);
 
-        let result1 = exec_trace_step(&reg, &state1, &instr).unwrap();
-        let result2 = exec_trace_step(&reg, &state2, &instr).unwrap();
+        let mut ctx1 = ExecCtlCtx::new();
+        let result1 = exec_trace_step(&reg, &state1, &instr, &mut ctx1).unwrap();
+        let mut ctx2 = ExecCtlCtx::new();
+        let result2 = exec_trace_step(&reg, &state2, &instr, &mut ctx2).unwrap();
 
         let chain1 = result1.get("__audit_chain").cloned().unwrap();
         let chain2 = result2.get("__audit_chain").cloned().unwrap();

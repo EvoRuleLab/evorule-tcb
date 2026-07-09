@@ -34,3 +34,16 @@ audit/
 
 # Hermes agent working memory (assistant scratch space, not for release)
 .hermes/
+
+# Local-only Chinese working-notes directory — see `.git/info/exclude`.
+# IMPORTANT (RELEASE.md L40-49): any personal folder with a Chinese name MUST be
+# ignored via `.git/info/exclude`, NOT here. `.gitignore` is itself a tracked
+# file; any CJK pattern in it is a release blocker (Phase 1, Hard Rule #1).
+# The `.git/info/exclude` entry is the single source of truth — keep these
+# two in sync if the folder is renamed.
+
+# Proptest crash-replay files (do not commit; recreate via `PROPTEST=debug`).
+*.proptest-regressions
+
+# Tarpaulin coverage report (generated; do not commit).
+cobertura.xml

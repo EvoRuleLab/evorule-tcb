@@ -25,7 +25,7 @@ each section corresponds to a major (X.0.0) or minor (x.Y.0) version bump.
 
 ## Current version: v0.1.0 (Initial Release)
 
-**Release date**: 2026-07-02
+**Release date**: 2026-07-01
 **Source**: 23 Rust files in `crates/tcb/src/`, 9 license/legal files at repo root.
 
 ### Migration TO v0.1.0 (new installations)

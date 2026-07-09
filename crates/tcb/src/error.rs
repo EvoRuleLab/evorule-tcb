@@ -116,6 +116,18 @@ pub enum EvoRuleError {
     /// Does NOT cover external file/config parsing errors — those belong to Governance.
     InvalidConfig { detail: String },
 
+    /// Instruction budget exhausted.
+    /// Total instruction count exceeded max_instructions (safety valve against runaway execution).
+    InstructionLimitExceeded { count: u64, max: u64 },
+
+    /// Registry frozen — cannot register new instructions.
+    /// The registry was frozen via `freeze()` and a registration was attempted.
+    RegistryFrozen { name: String },
+
+    /// Path depth limit exceeded.
+    /// The path depth exceeded MAX_PATH_DEPTH (safety limit for recursive path resolution).
+    PathDepthExceeded { depth: usize, max: usize },
+
     /// Generic error.
     Generic(String),
 }
@@ -197,6 +209,19 @@ impl fmt::Display for EvoRuleError {
             }
             EvoRuleError::InvalidConfig { detail } => {
                 write!(f, "Invalid configuration: {}", detail)
+            }
+            EvoRuleError::InstructionLimitExceeded { count, max } => {
+                write!(
+                    f,
+                    "Instruction limit exceeded: {} executed (max {})",
+                    count, max
+                )
+            }
+            EvoRuleError::RegistryFrozen { name } => {
+                write!(f, "Registry frozen: cannot register instruction '{}'", name)
+            }
+            EvoRuleError::PathDepthExceeded { depth, max } => {
+                write!(f, "Path depth limit exceeded: depth {}, max {}", depth, max)
             }
             EvoRuleError::Generic(msg) => {
                 write!(f, "Error: {}", msg)
@@ -288,6 +313,11 @@ pub fn invalid_config(detail: impl Into<String>) -> EvoRuleError {
     }
 }
 
+/// Convenience function for creating a PathDepthExceeded error.
+pub fn path_depth_exceeded(depth: usize, max: usize) -> EvoRuleError {
+    EvoRuleError::PathDepthExceeded { depth, max }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +368,12 @@ mod tests {
 
         let err = invalid_param("increment", "delta", "must be numeric");
         assert!(matches!(err, EvoRuleError::InvalidParam { .. }));
+
+        let err = invalid_config("max_depth < 0");
+        assert!(matches!(err, EvoRuleError::InvalidConfig { .. }));
+
+        let err = path_depth_exceeded(100, 64);
+        assert!(matches!(err, EvoRuleError::PathDepthExceeded { .. }));
     }
 
     #[test]
@@ -348,5 +384,160 @@ mod tests {
         assert!(format!("{}", rule_not_found("bar")).contains("bar"));
         assert!(format!("{}", missing_param("ctx", "p")).contains("p"));
         assert!(format!("{}", invalid_param("ctx", "p", "bad")).contains("bad"));
+    }
+
+    #[test]
+    fn test_all_error_variants_display() {
+        assert!(format!(
+            "{}",
+            EvoRuleError::IndexOutOfBounds {
+                index: 5,
+                length: 3
+            }
+        )
+        .contains("5"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::InvalidDomainType {
+                domain_type: "test".to_string()
+            }
+        )
+        .contains("test"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::UnknownInstruction {
+                instruction_type: "foo".to_string()
+            }
+        )
+        .contains("foo"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::DepthLimitExceeded {
+                current_depth: 100,
+                max_depth: 64
+            }
+        )
+        .contains("100"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::RuleNotFound {
+                rule_id: "bar".to_string()
+            }
+        )
+        .contains("bar"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::MissingParam {
+                context: "ctx".to_string(),
+                param: "p".to_string()
+            }
+        )
+        .contains("p"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::InvalidParam {
+                context: "ctx".to_string(),
+                param: "p".to_string(),
+                detail: "bad".to_string()
+            }
+        )
+        .contains("bad"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::ExecutionFailed {
+                instruction_type: "test".to_string(),
+                detail: "failed".to_string()
+            }
+        )
+        .contains("test"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::DomainMismatch {
+                domain_type: "atom".to_string(),
+                detail: "bad".to_string()
+            }
+        )
+        .contains("atom"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::JsonParseError {
+                detail: "invalid".to_string()
+            }
+        )
+        .contains("invalid"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::SerializationError {
+                detail: "failed".to_string()
+            }
+        )
+        .contains("failed"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::HashError {
+                detail: "corrupt".to_string()
+            }
+        )
+        .contains("corrupt"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::AuditError {
+                detail: "broken".to_string()
+            }
+        )
+        .contains("broken"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::ImmutabilityViolation {
+                field: "x".to_string()
+            }
+        )
+        .contains("x"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::InvalidConfig {
+                detail: "bad".to_string()
+            }
+        )
+        .contains("bad"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::InstructionLimitExceeded {
+                count: 1000,
+                max: 500
+            }
+        )
+        .contains("1000"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::RegistryFrozen {
+                name: "test".to_string()
+            }
+        )
+        .contains("test"));
+        assert!(format!(
+            "{}",
+            EvoRuleError::PathDepthExceeded {
+                depth: 100,
+                max: 64
+            }
+        )
+        .contains("100"));
+        assert!(format!("{}", EvoRuleError::Generic("msg".to_string())).contains("msg"));
+    }
+
+    #[test]
+    fn test_error_trait_impl() {
+        let err = type_error("int", "str");
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn test_error_partial_eq() {
+        let err1 = type_error("int", "str");
+        let err2 = type_error("int", "str");
+        let err3 = type_error("int", "bool");
+        assert_eq!(err1, err2);
+        assert_ne!(err1, err3);
     }
 }

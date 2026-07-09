@@ -3,6 +3,7 @@
 > **Source**: canonical programming spec (Chinese reference, not in release) sections §2.2 + §2.4 + §2.5 + §4.4 + §6.2 + §7.2 + §8.6
 > **Version**: 1.0 | Created: 2026-06-30 (project genesis)
 > **Enforcement**: pre-commit hook + CI workflow
+> **Unified Overview**: See `docs/gate/FORBIDDEN_OVERVIEW.md` for a consolidated view of ALL forbidden patterns across TCB + Governance layers.
 
 This document is the **single source of truth** for admission gates. Every gate traces back to a specific spec section.
 

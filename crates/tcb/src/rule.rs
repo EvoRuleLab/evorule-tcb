@@ -588,4 +588,202 @@ mod tests {
         let rule = Rule::from_dict(&data).unwrap();
         assert!(rule.is_meta, "Constitution rule should be meta-rule");
     }
+
+    #[test]
+    fn test_rule_collection_remove() {
+        let mut col = RuleCollection::new();
+        let rule = Rule::new("test", "test", Domain::Universal, Value::string("noop"));
+        col.add(rule);
+        assert_eq!(col.len(), 1);
+        let removed = col.remove("test");
+        assert!(removed.is_some());
+        assert_eq!(col.len(), 0);
+        assert!(col.get("test").is_none());
+    }
+
+    #[test]
+    fn test_rule_collection_remove_not_found() {
+        let mut col = RuleCollection::new();
+        let rule = Rule::new("test", "test", Domain::Universal, Value::string("noop"));
+        col.add(rule);
+        assert!(col.remove("missing").is_none());
+        assert_eq!(col.len(), 1);
+    }
+
+    #[test]
+    fn test_rule_collection_clear() {
+        let mut col = RuleCollection::new();
+        col.add(Rule::new(
+            "r1",
+            "r1",
+            Domain::Universal,
+            Value::string("noop"),
+        ));
+        col.add(Rule::new(
+            "r2",
+            "r2",
+            Domain::Universal,
+            Value::string("noop"),
+        ));
+        assert_eq!(col.len(), 2);
+        col.clear();
+        assert_eq!(col.len(), 0);
+        assert!(col.is_empty());
+    }
+
+    #[test]
+    fn test_rule_collection_iter() {
+        let mut col = RuleCollection::new();
+        col.add(Rule::new(
+            "r1",
+            "r1",
+            Domain::Universal,
+            Value::string("noop"),
+        ));
+        col.add(Rule::new(
+            "r2",
+            "r2",
+            Domain::Universal,
+            Value::string("noop"),
+        ));
+        let ids: Vec<&str> = col.iter().map(|r| r.rule_id.as_str()).collect();
+        assert_eq!(ids, vec!["r1", "r2"]);
+    }
+
+    #[test]
+    fn test_rule_weight() {
+        let mut rule = Rule::new("test", "test", Domain::Universal, Value::string("noop"));
+        rule.priority = 10;
+        rule.order = 5;
+        assert_eq!(rule.weight(), 100005);
+    }
+
+    #[test]
+    fn test_rule_to_dict_with_metadata() {
+        let mut rule = Rule::new("test", "test", Domain::Universal, Value::string("noop"));
+        rule.metadata = Value::string("meta");
+        rule.constitutional = true;
+        rule.enabled = false;
+        rule.is_meta = true;
+        let dict = rule.to_dict();
+        assert_eq!(dict.get("rule_id").and_then(|v| v.as_str()), Some("test"));
+        assert!(dict.contains_key("constitutional"));
+        assert!(dict.contains_key("enabled"));
+        assert!(dict.contains_key("is_meta"));
+        assert!(dict.contains_key("metadata"));
+    }
+
+    #[test]
+    fn test_rule_from_dict_missing_name() {
+        let mut data = HashMap::new();
+        data.insert("rule_id".to_string(), Value::string("test"));
+        data.insert(
+            "domain".to_string(),
+            Value::from(im::HashMap::from(vec![(
+                "type".to_string(),
+                Value::string("universal"),
+            )])),
+        );
+        data.insert("transform".to_string(), Value::string("noop"));
+        let rule = Rule::from_dict(&data).unwrap();
+        assert_eq!(rule.name, "test");
+    }
+
+    #[test]
+    fn test_rule_from_dict_missing_domain() {
+        let mut data = HashMap::new();
+        data.insert("rule_id".to_string(), Value::string("test"));
+        data.insert("name".to_string(), Value::string("test"));
+        data.insert("transform".to_string(), Value::string("noop"));
+        let rule = Rule::from_dict(&data).unwrap();
+        assert!(matches!(rule.domain, Domain::Universal));
+    }
+
+    #[test]
+    fn test_rule_from_dict_missing_transform() {
+        let mut data = HashMap::new();
+        data.insert("rule_id".to_string(), Value::string("test"));
+        data.insert("name".to_string(), Value::string("test"));
+        data.insert(
+            "domain".to_string(),
+            Value::from(im::HashMap::from(vec![(
+                "type".to_string(),
+                Value::string("universal"),
+            )])),
+        );
+        let result = Rule::from_dict(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rule_from_dict_negative_priority() {
+        let mut data = HashMap::new();
+        data.insert("rule_id".to_string(), Value::string("test"));
+        data.insert("name".to_string(), Value::string("test"));
+        data.insert(
+            "domain".to_string(),
+            Value::from(im::HashMap::from(vec![(
+                "type".to_string(),
+                Value::string("universal"),
+            )])),
+        );
+        data.insert("transform".to_string(), Value::string("noop"));
+        data.insert("priority".to_string(), Value::Integer(-100));
+        let rule = Rule::from_dict(&data).unwrap();
+        assert_eq!(rule.priority, 0);
+    }
+
+    #[test]
+    fn test_generic_instruction_simple() {
+        let instr = GenericInstruction::simple("noop");
+        assert_eq!(instr.instruction_type, "noop");
+        assert!(instr.params.is_empty());
+    }
+
+    #[test]
+    fn test_rule_display() {
+        let rule = Rule::new("test", "Test", Domain::Universal, Value::string("noop"));
+        let display = format!("{}", rule);
+        assert!(display.contains("test"));
+    }
+
+    #[test]
+    fn test_rule_collection_applicable() {
+        let mut col = RuleCollection::new();
+        let rule = Rule::new(
+            "test",
+            "test",
+            Domain::Atom {
+                attribute: "x".to_string(),
+                op: crate::domain::RelOp::Eq,
+                value: Value::Integer(42),
+            },
+            Value::string("noop"),
+        );
+        col.add(rule);
+        let state = crate::state::State::new(vec![("x", Value::Integer(42))]);
+        assert_eq!(col.applicable(&state).len(), 1);
+        let state2 = crate::state::State::new(vec![("x", Value::Integer(0))]);
+        assert_eq!(col.applicable(&state2).len(), 0);
+    }
+
+    #[test]
+    fn test_rule_collection_get() {
+        let mut col = RuleCollection::new();
+        col.add(Rule::new(
+            "r1",
+            "r1",
+            Domain::Universal,
+            Value::string("noop"),
+        ));
+        col.add(Rule::new(
+            "r2",
+            "r2",
+            Domain::Universal,
+            Value::string("noop"),
+        ));
+        assert!(col.get("r1").is_some());
+        assert!(col.get("r2").is_some());
+        assert!(col.get("r3").is_none());
+    }
 }

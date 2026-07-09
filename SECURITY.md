@@ -61,7 +61,7 @@ It does **not** apply to:
 - **Immutability**: TCB state is immutable (R-07 paradigm gate enforced).
 - **Isolation**: No `unsafe` (G-01 enforced). No external process execution (R-08 enforced).
 
-For details, see `docs/spec/en-US/TCB_Governance_Contract.txt` and `docs/spec/en-US/EvoRule_Determinism_Standard.md`.
+For details, see `docs/spec/en-US/TCB_Governance_Contract.md` and `docs/spec/en-US/EvoRule_Determinism_Standard.md`.
 
 ## Acknowledgments
 

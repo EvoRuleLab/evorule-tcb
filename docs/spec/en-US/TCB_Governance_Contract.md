@@ -35,7 +35,9 @@ The TCB relies entirely on Governance to initialize and maintain the `__exec__` 
 | `meta_instruction_types` | `List` | `eval_config.json` | `while_loop::drain_queue` (meta vs business) | Provide via `EvalConfig`. **MUST include `"noop"`**. |
 | `audit_on` | `Bool` | `eval_config.json` | `trace_step`, `drain_queue` | Provide via `EvalConfig`. Defaults to `true`. |
 | `drain_meta_trace` | `Bool` | `eval_config.json` | `while_loop::drain_queue` | Provide via `EvalConfig`. Defaults to `false`. |
-| `dispatch_cases` | `Object` | `core_eval.json` | `registry.rs` (fallback expansion) | Provide cases table for composite instructions. |
+| `dispatch_cases` | `Object` | governance-core (`DispatchTableBuilder`, built from `core_eval.json` skeleton + registry scan) | `control/dispatch.rs` (main dispatch path; fallback expansion) | Provide cases table built by governance-core's `DispatchTableBuilder.auto_from_registry()` + `register_core_aliases()`. **v1.1 change**: previously sourced directly from `core_eval.json`; now built dynamically (see §1.1). |
+| `dispatch_default` | `Object` | governance-core (`DispatchTableBuilder.set_default`) | `control/dispatch.rs` (main dispatch path when no case matches) | Provide default-case body for main-dispatch miss (prevents `while_loop` deadlock). Built by `build_dispatch_table()`. **v1.1 addition**. |
+| `dispatch_table_version` | `String` (SHA-256) | governance-core (`content_hash` of cases + default) | `primitive/audit_ops.rs` (appended to `change_summary` as `[tbl:<hash>]`) | Provide deterministic content-hash of the active dispatch table so each audit record carries the version that was in effect. Enables audit-chain traceability across dispatch-table evolution. **v1.1 addition — ER-605 Exception #2**. |
 
 > **Critical Rule**: Governance MUST ensure `meta_instruction_types` contains `"noop"`. If `noop` is not declared as a meta-instruction, the `drain_queue` logic will treat it as a business instruction, breaking the termination detection mechanism.
 
@@ -172,6 +174,7 @@ Governance layer code MUST use these TCB-provided helpers for consistency:
 | Version | Date | Notes |
 |---------|------|-------|
 | 1.0 | 2026-07-01 | Initial release. Formalizes TCB-Governance interaction boundary. |
+| 1.1 | 2026-07-05 | **Constitutional dispatch architecture integration** (governance-core integration — see §1.1 of this document and `CHANGELOG.md` for design rationale):<br>• §1 table: `dispatch_cases` source changed from `core_eval.json` to governance-core `DispatchTableBuilder`.<br>• §1 table: added `dispatch_default` and `dispatch_table_version` fields (governance-injected).<br>• **ER-605 Exception #1**: `control/dispatch.rs` — dual-source reading via `contains_key("cases")` distinguishes main dispatch (from `__exec__.dispatch_cases`) vs sub-dispatch (from `instruction.params.cases`).<br>• **ER-605 Exception #2**: `primitive/audit_ops.rs` — `trace_step` appends `[tbl:<hash>]` to `change_summary`.<br>• Cross-references: governance-core commits `fbd4844` (enforce ER-601 determinism + audit HMAC verification), `5d96587` (close ER-601 determinism gaps + add G-GOV-07 gate), `b4eaeda` (add GG-31 gate forbidding business logic hardcoded in Rust), `64cfb97` (migrate 14 GG-31 violations to JSON rules / primitives), `1f0d8cb` (Revert GG-31 premature deletion, restore future-code methods as TODO-migrate placeholders).<br>• Test count: 557 → 562 (cargo test --locked, 0 failed). |
 
 ---
 

@@ -78,6 +78,54 @@ pub type ImMap = im::HashMap<String, Value>;
 pub type ImVector = im::Vector<Value>;
 
 // ══════════════════════════════════════════════
+// Deterministic Iteration Extensions
+// ══════════════════════════════════════════════
+
+/// Extension trait for deterministic iteration over `im::HashMap`.
+///
+/// `im::HashMap` uses insertion-order iteration which is deterministic within
+/// a single process but may vary across processes if insertion order differs.
+/// This trait provides `iter_sorted()` which returns keys in lexicographic order,
+/// ensuring deterministic output for operations that depend on iteration order.
+///
+/// **Constitutional Redline (ER-601):** All iteration over collections that
+/// affects output must be deterministic.
+pub trait ImMapExt {
+    /// Returns an iterator over key-value pairs sorted by key.
+    ///
+    /// This ensures deterministic iteration order regardless of insertion order.
+    /// The returned iterator yields `(&String, &Value)` pairs.
+    fn iter_sorted(&self) -> impl Iterator<Item = (&String, &Value)>;
+
+    /// Returns an iterator over values sorted by their corresponding keys.
+    ///
+    /// This ensures deterministic iteration order for value-only access.
+    fn values_sorted(&self) -> impl Iterator<Item = &Value>;
+}
+
+impl ImMapExt for ImMap {
+    fn iter_sorted(&self) -> impl Iterator<Item = (&String, &Value)> {
+        let mut entries: Vec<(&String, &Value)> = self.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        entries.into_iter()
+    }
+
+    fn values_sorted(&self) -> impl Iterator<Item = &Value> {
+        let mut entries: Vec<(&String, &Value)> = self.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        entries.into_iter().map(|(_, v)| v)
+    }
+}
+
+pub fn iter_std_hashmap_sorted<K: Ord + Clone, V>(
+    m: &std::collections::HashMap<K, V>,
+) -> Vec<(&K, &V)> {
+    let mut entries: Vec<(&K, &V)> = m.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries
+}
+
+// ══════════════════════════════════════════════
 // Value Enum
 // ══════════════════════════════════════════════
 
@@ -244,6 +292,20 @@ impl Value {
         }
     }
 
+    /// Get the type name as a string for error messages.
+    pub fn type_name(&self) -> &str {
+        match self {
+            Self::Null => "Null",
+            Self::Bool(_) => "Bool",
+            Self::Integer(_) => "Integer",
+            Self::Float(_) => "Float",
+            Self::String(_) => "String",
+            Self::List(_) => "List",
+            Self::Object(_) => "Object",
+            Self::Bytes(_) => "Bytes",
+        }
+    }
+
     /// Get the string reference.
     pub fn as_str(&self) -> Option<&str> {
         match self {
@@ -393,36 +455,46 @@ impl Value {
 // Display
 // ══════════════════════════════════════════════
 
+const MAX_DISPLAY_DEPTH: usize = 128;
+
+fn value_fmt_inner(val: &Value, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
+    if depth > MAX_DISPLAY_DEPTH {
+        return write!(f, "...");
+    }
+    match val {
+        Value::Null => write!(f, "null"),
+        Value::Bool(b) => write!(f, "{b}"),
+        Value::Integer(i) => write!(f, "{i}"),
+        Value::Float(fl) => write!(f, "{}", fl.0),
+        Value::String(s) => write!(f, "\"{s}\""),
+        Value::List(v) => {
+            write!(f, "[")?;
+            for (i, item) in v.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                value_fmt_inner(item, f, depth + 1)?;
+            }
+            write!(f, "]")
+        }
+        Value::Object(m) => {
+            write!(f, "{{")?;
+            for (i, (k, v)) in m.iter_sorted().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "\"{k}\": ")?;
+                value_fmt_inner(v, f, depth + 1)?;
+            }
+            write!(f, "}}")
+        }
+        Value::Bytes(b) => write!(f, "bytes({})", b.len()),
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Null => write!(f, "null"),
-            Self::Bool(b) => write!(f, "{b}"),
-            Self::Integer(i) => write!(f, "{i}"),
-            Self::Float(fl) => write!(f, "{}", fl.0),
-            Self::String(s) => write!(f, "\"{s}\""),
-            Self::List(v) => {
-                write!(f, "[")?;
-                for (i, item) in v.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{item}")?;
-                }
-                write!(f, "]")
-            }
-            Self::Object(m) => {
-                write!(f, "{{")?;
-                for (i, (k, v)) in m.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "\"{k}\": {v}")?;
-                }
-                write!(f, "}}")
-            }
-            Self::Bytes(b) => write!(f, "bytes({})", b.len()),
-        }
+        value_fmt_inner(self, f, 0)
     }
 }
 
@@ -510,8 +582,12 @@ impl From<ImMap> for Value {
 // serde serialization bridge
 // ══════════════════════════════════════════════
 
-/// Convert `serde_json::Value` to `EvoRule` Value, handling NaN/Inf.
-pub fn serde_json_to_value(json: &serde_json::Value) -> Value {
+const MAX_JSON_DEPTH: usize = 128;
+
+fn serde_json_to_value_inner(json: &serde_json::Value, depth: usize) -> Value {
+    if depth > MAX_JSON_DEPTH {
+        return Value::Null;
+    }
     match json {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(*b),
@@ -526,20 +602,29 @@ pub fn serde_json_to_value(json: &serde_json::Value) -> Value {
         }
         serde_json::Value::String(s) => Value::String(s.clone()),
         serde_json::Value::Array(arr) => Value::List(ImVector::from(
-            arr.iter().map(serde_json_to_value).collect::<Vec<_>>(),
+            arr.iter()
+                .map(|v| serde_json_to_value_inner(v, depth + 1))
+                .collect::<Vec<_>>(),
         )),
         serde_json::Value::Object(obj) => {
             let mut map = ImMap::new();
             for (k, v) in obj {
-                map.insert(k.clone(), serde_json_to_value(v));
+                map.insert(k.clone(), serde_json_to_value_inner(v, depth + 1));
             }
             Value::Object(map)
         }
     }
 }
 
-/// Convert `EvoRule` Value to `serde_json::Value`.
-pub fn value_to_serde_json(val: &Value) -> serde_json::Value {
+/// Convert `serde_json::Value` to `EvoRule` Value, handling NaN/Inf.
+pub fn serde_json_to_value(json: &serde_json::Value) -> Value {
+    serde_json_to_value_inner(json, 0)
+}
+
+fn value_to_serde_json_inner(val: &Value, depth: usize) -> serde_json::Value {
+    if depth > MAX_JSON_DEPTH {
+        return serde_json::Value::Null;
+    }
     match val {
         Value::Null => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),
@@ -549,24 +634,31 @@ pub fn value_to_serde_json(val: &Value) -> serde_json::Value {
             if n.is_finite() {
                 serde_json::json!(n)
             } else if n.is_nan() {
-                // NaN → 0.0 (deterministic). Use json! macro to avoid from_f64 Option.
                 serde_json::json!(0.0_f64)
             } else {
-                // ±Infinity: JSON does not support them; encode as Null.
                 serde_json::Value::Null
             }
         }
         Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::List(v) => serde_json::Value::Array(v.iter().map(value_to_serde_json).collect()),
+        Value::List(v) => serde_json::Value::Array(
+            v.iter()
+                .map(|v| value_to_serde_json_inner(v, depth + 1))
+                .collect(),
+        ),
         Value::Object(m) => {
             let mut map = serde_json::Map::new();
-            for (k, v) in m.iter() {
-                map.insert(k.clone(), value_to_serde_json(v));
+            for (k, v) in m.iter_sorted() {
+                map.insert(k.clone(), value_to_serde_json_inner(v, depth + 1));
             }
             serde_json::Value::Object(map)
         }
         Value::Bytes(b) => serde_json::Value::String(hex::encode(b)),
     }
+}
+
+/// Convert `EvoRule` Value to `serde_json::Value`.
+pub fn value_to_serde_json(val: &Value) -> serde_json::Value {
+    value_to_serde_json_inner(val, 0)
 }
 
 // ══════════════════════════════════════════════

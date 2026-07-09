@@ -23,7 +23,8 @@
 //! All components in this module are **L1 deterministic**:
 //! - Registration is deterministic: same config → same registry.
 //! - Execution is deterministic: same instruction + same state → same output.
-//! - Depth tracking: `Cell<usize>` is thread-local, but TCB is single-threaded.
+//! - Depth tracking: via `ExecCtlCtx` (explicit parameter, no interior mutability).
+//! - Freeze: after `freeze()`, registry content is immutable (static analysis friendly).
 //!
 //! # Determinism Boundary (L2-L4)
 //!
@@ -31,9 +32,10 @@
 //! |--------|--------|-----------|
 //! | Instruction registration | ✅ L1 deterministic | Pure data |
 //! | Instruction execution | ✅ L1 deterministic | No side effects |
-//! | Depth protection | ✅ L1 deterministic | Integer comparison |
+//! | Depth protection | ✅ L1 deterministic | Integer comparison (in ExecCtlCtx) |
 //! | Context ops (add/sub/mul/div) | ✅ L1 deterministic | Saturating arithmetic |
 //! | Context ops (append/remove) | ✅ L1 deterministic | List operations |
+//! | Freeze mechanism | ✅ L1 deterministic | Boolean flag |
 //!
 //! # Cross-Language Note (L4)
 //!
@@ -41,11 +43,11 @@
 //! However, the serialization format (`to_value`) is JSON-compatible and can be
 //! used by other languages to inspect the registry.
 
-use crate::error::{depth_limit_exceeded, unknown_instruction, EvoRuleError};
+use crate::error::{unknown_instruction, EvoRuleError};
+use crate::exec_ctl_ctx::ExecCtlCtx;
 use crate::rule::GenericInstruction;
 use crate::state::State;
-use crate::value::Value;
-use std::cell::Cell;
+use crate::value::{iter_std_hashmap_sorted, ImMapExt, Value};
 use std::collections::HashMap;
 
 use super::ExecutorFn;
@@ -109,14 +111,12 @@ pub struct InstructionRegistry {
     instructions: HashMap<String, InstructionDef>,
     /// Context operations (add, sub, set, etc.).
     context_ops: HashMap<String, super::ContextOpFn>,
-    /// Execution depth counter.
+    /// Frozen flag — when true, no more registrations allowed.
     ///
-    /// [FIX #6]: Uses `Cell<usize>` instead of `Arc<AtomicUsize>`. The TCB is single-threaded,
-    /// and Cell provides the necessary interior mutability without the overhead of atomic
-    /// operations. Each registry instance maintains its own independent depth counter.
-    depth: Cell<usize>,
-    /// Maximum execution depth (default 64).
-    max_depth: usize,
+    /// Set to true by `freeze()` after all Layer 1 + Layer 2 primitives
+    /// are registered. This ensures the registry content is fixed for
+    /// the lifetime of the engine, enabling static analysis.
+    frozen: bool,
 }
 
 /// Instruction layer — describes where the primitive sits in the dependency graph.
@@ -199,13 +199,36 @@ impl InstructionRegistry {
         Self {
             instructions: HashMap::new(),
             context_ops: HashMap::new(),
-            depth: Cell::new(0),
-            max_depth: 64,
+            frozen: false,
         }
         .with_default_context_ops()
     }
 
+    /// Freeze the registry — no more registrations allowed.
+    ///
+    /// Called by `TheEquation::new()` after all Layer 1 + Layer 2 primitives
+    /// are registered. This ensures the registry content is fixed for
+    /// the lifetime of the engine, enabling static analysis.
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
+
+    /// Unfreeze the registry. Allows registration again.
+    ///
+    /// Used for runtime primitive swapping: clone existing registry, unfreeze,
+    /// replace primitive, freeze again.
+    pub fn unfreeze(&mut self) {
+        self.frozen = false;
+    }
+
+    /// Check if the registry is frozen.
+    pub const fn is_frozen(&self) -> bool {
+        self.frozen
+    }
+
     /// Register an instruction (default D0 layer).
+    ///
+    /// Returns error if registry is frozen.
     pub fn register(&mut self, name: &str, exec: ExecutorFn) {
         self.register_with_metadata(name, exec, None, None, InstructionLayer::D0);
     }
@@ -216,6 +239,8 @@ impl InstructionRegistry {
     }
 
     /// Register an instruction with metadata.
+    ///
+    /// Silently ignores registration if frozen (defensive).
     pub fn register_with_metadata(
         &mut self,
         name: &str,
@@ -224,6 +249,11 @@ impl InstructionRegistry {
         explainer: Option<fn(&GenericInstruction) -> String>,
         layer: InstructionLayer,
     ) {
+        if self.frozen {
+            // Defensive: silently ignore in release, panic in debug
+            debug_assert!(false, "Cannot register instruction '{}' after freeze", name);
+            return;
+        }
         self.instructions.insert(
             name.to_string(),
             InstructionDef {
@@ -279,23 +309,35 @@ impl InstructionRegistry {
     /// If the instruction is not in the registry, attempts to execute via
     /// `dispatch_cases` fallback. `dispatch_cases` is stored in state.__exec__.`dispatch_cases`
     /// and is injected by `TheEquation`.
+    ///
+    /// # Depth & Budget Protection
+    ///
+    /// Uses `ExecCtlCtx` for depth tracking and instruction budget enforcement.
+    /// Returns `DepthLimitExceeded` or `InstructionLimitExceeded` on violation.
     pub fn execute(
         &self,
         state: &State,
         instruction: &GenericInstruction,
+        ctx: &mut ExecCtlCtx,
     ) -> Result<State, EvoRuleError> {
-        // Depth protection
-        let current_depth = self.depth.get();
-        if current_depth >= self.max_depth {
-            return Err(depth_limit_exceeded(current_depth, self.max_depth));
-        }
-        self.depth.set(current_depth + 1);
+        // Depth & budget protection (replaces Cell<usize>)
+        ctx.enter()?;
 
+        let result = self.execute_inner(state, instruction, ctx);
+        ctx.exit();
+        result
+    }
+
+    /// Inner execution — called by `execute()` after depth increment.
+    fn execute_inner(
+        &self,
+        state: &State,
+        instruction: &GenericInstruction,
+        ctx: &mut ExecCtlCtx,
+    ) -> Result<State, EvoRuleError> {
         // First try direct lookup in the registry
         if let Some(def) = self.get(&instruction.instruction_type) {
-            let result = (def.exec)(self, state, instruction);
-            self.depth.set(self.depth.get() - 1);
-            return result;
+            return (def.exec)(self, state, instruction, ctx);
         }
 
         // Fallback: execute composite instructions via dispatch_cases
@@ -318,7 +360,6 @@ impl InstructionRegistry {
 
                 // FLOW-03 fix: prevent nested dispatch expansion
                 if case_instr.instruction_type == "dispatch" {
-                    self.depth.set(self.depth.get() - 1);
                     return Err(EvoRuleError::InvalidConfig {
                         detail: format!(
                             "[dispatch] nested dispatch not allowed: case '{}' contains dispatch instruction",
@@ -334,21 +375,26 @@ impl InstructionRegistry {
                     &case_instr.instruction_type,
                 );
 
-                let result = self.execute(&state_with_meta, &case_instr);
-                self.depth.set(self.depth.get() - 1);
-                return result;
+                return self.execute_inner(&state_with_meta, &case_instr, ctx);
             }
         }
 
         // Not found
-        self.depth.set(current_depth);
         Err(unknown_instruction(&instruction.instruction_type))
     }
 
     /// Execute a Value instruction.
-    pub fn execute_value(&self, state: &State, instr_val: &Value) -> Result<State, EvoRuleError> {
+    ///
+    /// Convenience wrapper that parses the Value into a GenericInstruction
+    /// and then calls `execute()`.
+    pub fn execute_value(
+        &self,
+        state: &State,
+        instr_val: &Value,
+        ctx: &mut ExecCtlCtx,
+    ) -> Result<State, EvoRuleError> {
         let instr = GenericInstruction::from_value(instr_val)?;
-        self.execute(state, &instr)
+        self.execute(state, &instr, ctx)
     }
 
     /// Register a context operation (add, sub, set).
@@ -361,26 +407,12 @@ impl InstructionRegistry {
         self.context_ops.get(name).copied()
     }
 
-    /// Set default context operations (add, sub, set).
-    /// Reset the depth counter.
-    pub fn reset_depth(&self) {
-        self.depth.set(0);
-    }
-
-    /// Get the current depth.
-    pub fn current_depth(&self) -> usize {
-        self.depth.get()
-    }
-
-    /// Set the maximum execution depth.
-    pub fn set_max_depth(&mut self, max: usize) {
-        self.max_depth = max;
-    }
-
-    /// Get the maximum execution depth.
-    pub const fn max_depth(&self) -> usize {
-        self.max_depth
-    }
+    // Note: depth management moved to ExecCtlCtx.
+    // The following methods are removed (use ExecCtlCtx instead):
+    // - reset_depth() → use ctx.reset_depth()
+    // - current_depth() → use ctx.depth()
+    // - set_max_depth(n) → use ExecCtlCtx::with_max_depth(n)
+    // - max_depth() → use ctx.max_depth()
 
     // ==================================================
     // Introspection
@@ -418,9 +450,8 @@ impl InstructionRegistry {
 
     /// Serialize the registry to a Value.
     pub fn to_value(&self) -> Value {
-        let entries: Vec<Value> = self
-            .instructions
-            .iter()
+        let entries: Vec<Value> = iter_std_hashmap_sorted(&self.instructions)
+            .into_iter()
             .map(|(name, def)| {
                 let mut entry = im::hashmap! {
                     "instruction_type".to_string() => Value::String(name.clone()),
@@ -674,14 +705,13 @@ pub fn register_from_config(
         map
     };
 
-    for (_category_name, category_val) in categories.iter() {
-        // Skip metadata fields like _description
+    for (_category_name, category_val) in categories.iter_sorted() {
         let primitives = match category_val {
             Value::Object(obj) => obj,
             _ => continue,
         };
 
-        for (prim_name, prim_val) in primitives.iter() {
+        for (prim_name, prim_val) in primitives.iter_sorted() {
             // Skip metadata fields like _description
             if prim_name.starts_with('_') {
                 continue;
@@ -898,7 +928,7 @@ mod tests {
     #[test]
     fn test_registry_register_and_get() {
         let mut reg = InstructionRegistry::new();
-        reg.register("noop", |_, s, _| Ok(s.clone()));
+        reg.register("noop", |_, s, _, _| Ok(s.clone()));
         assert!(reg.has("noop"));
     }
 
@@ -996,7 +1026,7 @@ mod tests {
 
         reg.register_with_metadata(
             "test_instr",
-            |_, s, _| Ok(s.clone()),
+            |_, s, _, _| Ok(s.clone()),
             Some(eval_branch),
             Some(explainer),
             InstructionLayer::D0,
@@ -1018,8 +1048,8 @@ mod tests {
     #[test]
     fn test_registry_list_instructions() {
         let mut reg = InstructionRegistry::new();
-        reg.register("instr_a", |_, s, _| Ok(s.clone()));
-        reg.register("instr_b", |_, s, _| Ok(s.clone()));
+        reg.register("instr_a", |_, s, _, _| Ok(s.clone()));
+        reg.register("instr_b", |_, s, _, _| Ok(s.clone()));
 
         let all = reg.list_instructions();
         assert!(all.contains(&"instr_a".to_string()));
@@ -1034,21 +1064,29 @@ mod tests {
     fn test_instruction_layer() {
         let mut reg = InstructionRegistry::new();
         // register defaults to D0
-        reg.register("noop_like", |_, s, _| Ok(s.clone()));
+        reg.register("noop_like", |_, s, _, _| Ok(s.clone()));
         assert_eq!(reg.get_layer("noop_like"), Some(InstructionLayer::D0));
 
         // register_with_layer specifies the layer
         reg.register_with_layer(
             "dispatch_like",
-            |_, s, _| Ok(s.clone()),
+            |_, s, _, _| Ok(s.clone()),
             InstructionLayer::D1,
         );
         assert_eq!(reg.get_layer("dispatch_like"), Some(InstructionLayer::D1));
 
-        reg.register_with_layer("trace_like", |_, s, _| Ok(s.clone()), InstructionLayer::D4);
+        reg.register_with_layer(
+            "trace_like",
+            |_, s, _, _| Ok(s.clone()),
+            InstructionLayer::D4,
+        );
         assert_eq!(reg.get_layer("trace_like"), Some(InstructionLayer::D4));
 
-        reg.register_with_layer("eval_like", |_, s, _| Ok(s.clone()), InstructionLayer::E0);
+        reg.register_with_layer(
+            "eval_like",
+            |_, s, _, _| Ok(s.clone()),
+            InstructionLayer::E0,
+        );
         assert_eq!(reg.get_layer("eval_like"), Some(InstructionLayer::E0));
 
         // Non-existent instruction returns None
@@ -1058,13 +1096,21 @@ mod tests {
     #[test]
     fn test_instructions_by_layer() {
         let mut reg = InstructionRegistry::new();
-        reg.register_with_layer("noop", |_, s, _| Ok(s.clone()), InstructionLayer::D0);
-        reg.register_with_layer("set_context", |_, s, _| Ok(s.clone()), InstructionLayer::D0);
-        reg.register_with_layer("dispatch", |_, s, _| Ok(s.clone()), InstructionLayer::D1);
-        reg.register_with_layer("trace_step", |_, s, _| Ok(s.clone()), InstructionLayer::D4);
+        reg.register_with_layer("noop", |_, s, _, _| Ok(s.clone()), InstructionLayer::D0);
+        reg.register_with_layer(
+            "set_context",
+            |_, s, _, _| Ok(s.clone()),
+            InstructionLayer::D0,
+        );
+        reg.register_with_layer("dispatch", |_, s, _, _| Ok(s.clone()), InstructionLayer::D1);
+        reg.register_with_layer(
+            "trace_step",
+            |_, s, _, _| Ok(s.clone()),
+            InstructionLayer::D4,
+        );
         reg.register_with_layer(
             "content_hash",
-            |_, s, _| Ok(s.clone()),
+            |_, s, _, _| Ok(s.clone()),
             InstructionLayer::E0,
         );
 
@@ -1131,7 +1177,7 @@ mod tests {
     #[test]
     fn test_registry_to_value() {
         let mut reg = InstructionRegistry::new();
-        reg.register("test", |_, s, _| Ok(s.clone()));
+        reg.register("test", |_, s, _, _| Ok(s.clone()));
 
         let value = reg.to_value();
 
@@ -1287,15 +1333,16 @@ mod tests {
         let primitive_fns = crate::primitive::all_exec_fns();
         let control_fns = crate::control::all_exec_fns();
 
-        // Physical primitives: 21 entries (20 + domain_intersect per ADR-05)
-        // Compute_ops reduced to 3 (content_hash, format_string, get_index)
+        // Physical primitives: 24 entries (22 + set_intersection, set_diff, set_union per GG-31 migration,
+        //                      minus format_string moved to Governance layer)
+        // Compute_ops: 6 (content_hash, get_index, object_keys, set_intersection, set_diff, set_union)
         // Inference_ops: 3 (detect_conflicts, detect_cycles, analyze_rule_effects)
         // Removed: iterate_list, io_read, io_write, check_dimension_consistency,
-        //          evaluate_expression, and other deprecated primitives
+        //          evaluate_expression, format_string, and other deprecated primitives
         assert_eq!(
             primitive_fns.len(),
-            21,
-            "primitive all_exec_fns should have 21 entries"
+            24,
+            "primitive all_exec_fns should have 24 entries"
         );
         // Control flow primitives: 2 entries
         assert_eq!(
@@ -1306,15 +1353,15 @@ mod tests {
 
         // Verify consistency with create_full_registry()
         let reg = create_full_registry();
-        // Registry contains 21 physical + 2 control = 23 primitives
+        // Registry contains 24 physical + 2 control = 26 primitives
         assert_eq!(
             reg.len(),
-            23,
-            "full registry should have 23 instructions (21 primitive + 2 control)"
+            26,
+            "full registry should have 26 instructions (24 primitive + 2 control)"
         );
     }
 
-    /// C4: Self-explainability — verify all 30 primitives have an explainer registered
+    /// C4: Self-explainability — verify all 27 primitives have an explainer registered
     #[test]
     fn test_c4_all_primitives_have_explainer() {
         let reg = create_full_registry();
@@ -1430,9 +1477,11 @@ mod tests {
             "increment".to_string() => Value::Object(im::hashmap! {
                 "type".to_string() => Value::string("set_context"),
                 "params".to_string() => Value::Object(im::hashmap! {
-                    "key".to_string() => Value::string("x"),
-                    "operation".to_string() => Value::string("add"),
-                    "value".to_string() => Value::Integer(1),
+                    "transform".to_string() => Value::Object(im::hashmap! {
+                        "attr".to_string() => Value::string("x"),
+                        "operation".to_string() => Value::string("add"),
+                        "value".to_string() => Value::Integer(1),
+                    }),
                 }),
             }),
         });
@@ -1456,7 +1505,8 @@ mod tests {
         };
 
         // Execute the fallback path
-        let result = reg.execute(&state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = reg.execute(&state, &instr, &mut ctx).unwrap();
 
         // Verify the audit chain contains a dispatch_expand record
         let chain_val = result.get("__audit_chain").cloned().unwrap();
@@ -1504,9 +1554,14 @@ mod tests {
 
         // set_context is a physical primitive, directly registered in the registry
         let mut params = std::collections::HashMap::new();
-        params.insert("key".to_string(), Value::string("x"));
-        params.insert("operation".to_string(), Value::string("add"));
-        params.insert("value".to_string(), Value::Integer(1));
+        params.insert(
+            "transform".to_string(),
+            Value::Object(im::hashmap! {
+                "attr".to_string() => Value::string("x"),
+                "operation".to_string() => Value::string("add"),
+                "value".to_string() => Value::Integer(1),
+            }),
+        );
 
         let instr = GenericInstruction {
             instruction_type: "set_context".to_string(),
@@ -1514,7 +1569,8 @@ mod tests {
             metadata: Value::empty_object(),
         };
 
-        let result = reg.execute(&state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = reg.execute(&state, &instr, &mut ctx).unwrap();
 
         // The audit chain should remain empty (set_context itself doesn't write to the
         // audit chain, and dispatch_expand shouldn't be generated)
@@ -1568,7 +1624,8 @@ mod tests {
             metadata: Value::empty_object(),
         };
 
-        let result = reg.execute(&state, &instr).unwrap();
+        let mut ctx = ExecCtlCtx::new();
+        let result = reg.execute(&state, &instr, &mut ctx).unwrap();
 
         let chain_val = result.get("__audit_chain").cloned().unwrap();
         let chain_state = AuditChainState::from_value(&chain_val).unwrap();
@@ -1610,7 +1667,7 @@ mod tests {
     fn test_register_with_layer() {
         // register_with_layer registers an instruction with a specified layer
         let mut reg = InstructionRegistry::new();
-        let exec_fn: ExecutorFn = |_reg, state: &State, _instr| Ok(state.clone());
+        let exec_fn: ExecutorFn = |_reg, state: &State, _instr, _ctx| Ok(state.clone());
         reg.register_with_layer("layered_op", exec_fn, InstructionLayer::D3);
         assert!(reg.has("layered_op"));
         let def = reg.get("layered_op").unwrap();
@@ -1654,7 +1711,8 @@ mod tests {
         let state = State::new(vec![("x", Value::Integer(5))]);
         let instr =
             GenericInstruction::new("unknown_instruction", std::collections::HashMap::new());
-        let result = reg.execute(&state, &instr);
+        let mut ctx = ExecCtlCtx::new();
+        let result = reg.execute(&state, &instr, &mut ctx);
         assert!(result.is_err());
     }
 
@@ -1667,27 +1725,28 @@ mod tests {
             "params".to_string(),
             Value::empty_object(),
         )]));
-        let result = reg.execute_value(&state, &instr_val);
+        let mut ctx = ExecCtlCtx::new();
+        let result = reg.execute_value(&state, &instr_val, &mut ctx);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_reset_depth_and_current_depth() {
         // reset_depth resets the depth counter
-        let mut reg = create_full_registry();
-        reg.set_max_depth(100);
-        let depth = reg.current_depth();
+        let mut ctx = ExecCtlCtx::new();
+        ctx.set_max_depth(100);
+        let depth = ctx.depth();
         assert!(depth <= 100);
     }
 
     #[test]
     fn test_set_max_depth() {
         // set_max_depth modifies the maximum depth
-        let mut reg = create_full_registry();
-        reg.set_max_depth(50);
-        assert_eq!(reg.max_depth(), 50);
-        reg.set_max_depth(200);
-        assert_eq!(reg.max_depth(), 200);
+        let mut ctx = ExecCtlCtx::new();
+        ctx.set_max_depth(50);
+        assert_eq!(ctx.max_depth(), 50);
+        ctx.set_max_depth(200);
+        assert_eq!(ctx.max_depth(), 200);
     }
 
     #[test]

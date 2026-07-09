@@ -27,7 +27,7 @@
 //!
 //! ┌──────────────────┐
 //! │    Layer 0       │  value, error
-//! │    Layer 1       │  exec_context
+//! │    Layer 1       │  exec_context, exec_ctl_ctx
 //! │    Layer 2       │  state, domain, deterministic
 //! │    Layer 3       │  rule
 //! │    Layer 4       │  audit
@@ -80,12 +80,10 @@
     clippy::single_char_pattern,
     // Map unwrap_or: often clearer than map_or_else for simple cases
     clippy::map_unwrap_or,
-    // Assigning clone: sometimes needed for clarity
-    clippy::assigning_clones,
     // Items after statements: sometimes needed for readability
     clippy::items_after_statements,
     // Ref option: &Option<T> vs Option<&T> — API design choice
-    clippy::ref_option,
+    clippy::ref_option_ref,
     // Intra-doc link with quotes: false positive in code blocks
     clippy::doc_link_with_quotes,
     // Unwrap_or with function call: common test pattern, negligible cost
@@ -126,11 +124,20 @@
 )]
 
 // Layer 0 — Leaf nodes, no dependencies
+
+// Crate-level allow for unknown lint names: clippy 1.75.0 (pinned toolchain) does
+// not recognize every lint introduced in later clippy versions. Source files
+// retain their per-module `#![allow(clippy::<newer-name>)]` lines for forward
+// compatibility with newer toolchains; this blanket allows those names to be
+// accepted as unknown by 1.75.0 instead of failing compilation.
+#![allow(unknown_lints)]
+
 pub mod error;
 pub mod value;
 
 // Layer 1 — Depends on value
 pub mod exec_context;
+pub mod exec_ctl_ctx;
 
 // Layer 2 — Depends on exec_context + value
 pub mod state;
@@ -159,5 +166,6 @@ pub mod control;
 // Re-exports for convenient access
 pub use domain::Domain;
 pub use error::EvoRuleError;
+pub use exec_ctl_ctx::ExecCtlCtx;
 pub use state::State;
 pub use value::Value;

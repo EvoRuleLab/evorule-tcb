@@ -20,6 +20,7 @@
 
 use crate::domain::Domain;
 use crate::error::EvoRuleError;
+use crate::exec_ctl_ctx::ExecCtlCtx;
 use crate::instruction::registry::InstructionRegistry;
 use crate::rule::GenericInstruction;
 use crate::state::State;
@@ -49,6 +50,7 @@ pub fn exec_while_loop(
     reg: &InstructionRegistry,
     state: &State,
     instruction: &GenericInstruction,
+    ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let condition = instruction.params.get("condition").cloned();
     let max_steps = instruction
@@ -75,6 +77,7 @@ pub fn exec_while_loop(
         // ── 1. Check condition ──
         let should_continue = check_condition(&current_state, &condition)?;
         if !should_continue {
+            #[cfg(feature = "tracing")]
             log::trace!(
                 "[while_loop] step={} condition not satisfied, exiting loop",
                 step
@@ -83,6 +86,7 @@ pub fn exec_while_loop(
             break;
         }
 
+        #[cfg(feature = "tracing")]
         log::trace!(
             "[while_loop] step={} executing body, current instruction type='{}'",
             step,
@@ -99,12 +103,12 @@ pub fn exec_while_loop(
             Some(Value::List(instructions)) => {
                 for instr_val in instructions.iter() {
                     let instr = GenericInstruction::from_value(instr_val)?;
-                    current_state = reg.execute(&current_state, &instr)?;
+                    current_state = reg.execute(&current_state, &instr, ctx)?;
                 }
             }
             Some(body_instr) => {
                 let instr = GenericInstruction::from_value(body_instr)?;
-                current_state = reg.execute(&current_state, &instr)?;
+                current_state = reg.execute(&current_state, &instr, ctx)?;
             }
             None => {
                 condition_holds_at_exit = false;
@@ -113,10 +117,18 @@ pub fn exec_while_loop(
         }
 
         // ── 3. Drain queue (aligned with v2) ──
-        current_state = drain_queue(reg, &current_state, &meta_types, audit_on, drain_meta_trace)?;
+        current_state = drain_queue(
+            reg,
+            &current_state,
+            &meta_types,
+            audit_on,
+            drain_meta_trace,
+            ctx,
+        )?;
 
         // Check __running again after drain
         if !is_running(&current_state) {
+            #[cfg(feature = "tracing")]
             log::trace!(
                 "[while_loop] step={} __running=false after drain, exiting loop",
                 step
@@ -135,12 +147,14 @@ pub fn exec_while_loop(
         last_step == max_steps - 1 && condition_holds_at_exit && is_running(&current_state);
 
     if terminated_by_max_steps {
+        #[cfg(feature = "tracing")]
         log::warn!(
             "[while_loop] forcibly truncated at max_steps={}, condition still true \
              (possible infinite loop or rule logic error)",
             max_steps
         );
     } else {
+        #[cfg(feature = "tracing")]
         log::trace!(
             "[while_loop] normal exit: last_step={}, condition_holds={}, running={}",
             last_step,
@@ -175,6 +189,7 @@ fn drain_queue(
     meta_types: &[String],
     audit_on: bool,
     drain_meta_trace: bool,
+    ctx: &mut ExecCtlCtx,
 ) -> Result<State, EvoRuleError> {
     let mut current_state = state.clone();
 
@@ -194,6 +209,7 @@ fn drain_queue(
         if !queue.is_empty() {
             // Check __running flag
             if !is_running(&current_state) {
+                #[cfg(feature = "tracing")]
                 log::trace!("[drain] __running=false, stopping drain");
                 break;
             }
@@ -201,6 +217,7 @@ fn drain_queue(
             // Pop the front element
             let (first, remaining) = queue.split_at(1);
             let next_dict = first[0].clone();
+            #[cfg(feature = "tracing")]
             let remaining_len = remaining.len();
 
             // Update the queue
@@ -214,6 +231,7 @@ fn drain_queue(
 
             if meta_types.contains(&next_type) {
                 // Meta-instruction: execute directly, continue draining
+                #[cfg(feature = "tracing")]
                 log::trace!(
                     "[drain] popped meta-instruction: type='{}', remaining queue length={}",
                     next_type,
@@ -222,15 +240,19 @@ fn drain_queue(
                 current_state =
                     set_trace_source(&current_state, &format!("drain_meta:{}", next_type));
                 let next_instr = GenericInstruction::from_value(&next_dict)?;
-                current_state = reg.execute(&current_state, &next_instr)?;
+                current_state = reg.execute(&current_state, &next_instr, ctx)?;
 
                 if audit_on && drain_meta_trace {
-                    current_state =
-                        reg.execute(&current_state, &GenericInstruction::simple("trace_step"))?;
+                    current_state = reg.execute(
+                        &current_state,
+                        &GenericInstruction::simple("trace_step"),
+                        ctx,
+                    )?;
                 }
                 // Continue draining
             } else {
                 // Business instruction: set as current instruction + audit + break to dispatch
+                #[cfg(feature = "tracing")]
                 log::trace!(
                     "[drain] popped business instruction: type='{}', setting as current and breaking",
                     next_type
@@ -238,8 +260,11 @@ fn drain_queue(
                 current_state = current_state.update_exec_field("instruction", next_dict);
                 current_state = set_trace_source(&current_state, "queue_pop");
                 if audit_on {
-                    current_state =
-                        reg.execute(&current_state, &GenericInstruction::simple("trace_step"))?;
+                    current_state = reg.execute(
+                        &current_state,
+                        &GenericInstruction::simple("trace_step"),
+                        ctx,
+                    )?;
                 }
                 break;
             }
@@ -257,13 +282,17 @@ fn drain_queue(
             // break to dispatch. This includes cases where it's a non-noop business
             // instruction that was already set by a previous drain.
             if !cur_type.is_empty() && !meta_types.contains(&cur_type) {
+                #[cfg(feature = "tracing")]
                 log::trace!(
                     "[drain] queue empty, current instruction type='{}' is business, breaking to dispatch",
                     cur_type
                 );
                 if audit_on {
-                    current_state =
-                        reg.execute(&current_state, &GenericInstruction::simple("trace_step"))?;
+                    current_state = reg.execute(
+                        &current_state,
+                        &GenericInstruction::simple("trace_step"),
+                        ctx,
+                    )?;
                 }
                 break;
             }
@@ -272,6 +301,7 @@ fn drain_queue(
             // This will trigger advance_instruction, which checks termination_domain
             // and injects default_instruction (noop) when queue is empty, eventually
             // setting __running=false when termination condition is met.
+            #[cfg(feature = "tracing")]
             log::trace!(
                 "[drain] queue empty, current instruction type='{}', executing advance_instruction",
                 cur_type
@@ -280,10 +310,14 @@ fn drain_queue(
             current_state = reg.execute(
                 &current_state,
                 &GenericInstruction::simple("advance_instruction"),
+                ctx,
             )?;
             if audit_on {
-                current_state =
-                    reg.execute(&current_state, &GenericInstruction::simple("trace_step"))?;
+                current_state = reg.execute(
+                    &current_state,
+                    &GenericInstruction::simple("trace_step"),
+                    ctx,
+                )?;
             }
             break;
         }
@@ -342,6 +376,7 @@ fn load_meta_types(state: &State) -> Vec<String> {
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect(),
         None => {
+            #[cfg(feature = "tracing")]
             log::warn!(
                 "load_meta_types: '__exec__.meta_instruction_types' not found or invalid; \
                  using empty list (only built-in fallbacks will be treated as meta)"
@@ -421,6 +456,7 @@ mod tests {
     #[test]
     fn test_while_loop_with_dispatch_and_advance() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         let dispatch_instr = Value::Object(im::hashmap! {
             "type".to_string() => Value::string("dispatch"),
@@ -488,7 +524,7 @@ mod tests {
             .set("__exec__", exec)
             .set("x", Value::Integer(0));
 
-        let result = exec_while_loop(&reg, &state, &instr).unwrap();
+        let result = exec_while_loop(&reg, &state, &instr, &mut ctx).unwrap();
         // increment → set_context(x+=1) → advance → queue empty → noop → advance → stop
         assert_eq!(result.get("x"), Some(&Value::Integer(1)));
     }
@@ -496,6 +532,7 @@ mod tests {
     #[test]
     fn test_while_loop_zero_iterations() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
         let exec = make_exec_context();
         let state_with_exec = State::empty().set("__exec__", exec);
         let state_with_exec = state_with_exec.update_exec_field("__running", Value::Bool(false));
@@ -508,7 +545,7 @@ mod tests {
         params.insert("body".to_string(), Value::empty_list());
         let instr = GenericInstruction::new("while_loop", params);
 
-        let result = exec_while_loop(&reg, &state, &instr).unwrap();
+        let result = exec_while_loop(&reg, &state, &instr, &mut ctx).unwrap();
         assert!(!is_running(&result));
         assert_eq!(
             result
@@ -529,6 +566,7 @@ mod tests {
     #[test]
     fn test_while_loop_terminated_by_max_steps_dead_loop() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         // Initial __running=true, body is noop (won't set __running to false)
         let exec = Value::Object(im::hashmap! {
@@ -560,7 +598,7 @@ mod tests {
         params.insert("max_steps".to_string(), Value::Integer(5));
         let instr = GenericInstruction::new("while_loop", params);
 
-        let result = exec_while_loop(&reg, &state, &instr).unwrap();
+        let result = exec_while_loop(&reg, &state, &instr, &mut ctx).unwrap();
 
         // Truncation flag should be true
         assert_eq!(
@@ -584,6 +622,7 @@ mod tests {
         // Even if a dirty state (true) was left from a previous run, this normal exit
         // should override it to false.
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         // Pre-write a dirty truncation flag (true) in __exec__
         let exec = Value::Object(im::hashmap! {
@@ -612,7 +651,7 @@ mod tests {
         params.insert("max_steps".to_string(), Value::Integer(10));
         let instr = GenericInstruction::new("while_loop", params);
 
-        let result = exec_while_loop(&reg, &state, &instr).unwrap();
+        let result = exec_while_loop(&reg, &state, &instr, &mut ctx).unwrap();
 
         // Normal exit (__running=false), dirty state should be cleared to false
         assert_eq!(
@@ -708,6 +747,7 @@ mod tests {
     #[test]
     fn test_self_driving_single_instruction_lifecycle() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         let cases = im::hashmap! {
             "set".to_string() => Value::Object(im::hashmap! {
@@ -733,7 +773,7 @@ mod tests {
             .set("__exec__", exec)
             .set("score", Value::Integer(0));
 
-        let result = exec_while_loop(&reg, &state, &while_loop).unwrap();
+        let result = exec_while_loop(&reg, &state, &while_loop, &mut ctx).unwrap();
 
         // Verify: set → set_context(score=100) → advance → noop → advance → stop
         assert_eq!(result.get("score"), Some(&Value::Integer(100)));
@@ -746,6 +786,7 @@ mod tests {
     #[test]
     fn test_self_driving_multi_instruction_queue() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         // case "increment": x += 1
         let cases = im::hashmap! {
@@ -804,7 +845,7 @@ mod tests {
             .set("__exec__", exec)
             .set("x", Value::Integer(0));
 
-        let result = exec_while_loop(&reg, &state, &while_loop).unwrap();
+        let result = exec_while_loop(&reg, &state, &while_loop, &mut ctx).unwrap();
 
         // Verify: both increments executed, x = 0 + 1 + 1 = 2
         assert_eq!(result.get("x"), Some(&Value::Integer(2)));
@@ -816,6 +857,7 @@ mod tests {
     #[test]
     fn test_self_driving_drain_meta_immediate_execution() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         // case "set": set y=10
         let cases = im::hashmap! {
@@ -881,7 +923,7 @@ mod tests {
             .set("y", Value::Integer(0))
             .set("z", Value::Integer(0));
 
-        let result = exec_while_loop(&reg, &state, &while_loop).unwrap();
+        let result = exec_while_loop(&reg, &state, &while_loop, &mut ctx).unwrap();
 
         // Verify: case body sets y=10, drain meta-instruction set_context sets z=5
         assert_eq!(result.get("y"), Some(&Value::Integer(10)));
@@ -894,6 +936,7 @@ mod tests {
     #[test]
     fn test_self_driving_default_branch_termination() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         let cases = im::hashmap! {};
         let default = Value::Object(im::hashmap! {
@@ -908,7 +951,7 @@ mod tests {
             .set("__exec__", exec)
             .set("x", Value::Integer(42));
 
-        let result = exec_while_loop(&reg, &state, &while_loop).unwrap();
+        let result = exec_while_loop(&reg, &state, &while_loop, &mut ctx).unwrap();
 
         // Verify: unknown → default(advance) → noop → advance → stop
         assert_eq!(
@@ -924,6 +967,7 @@ mod tests {
     #[test]
     fn test_self_driving_termination_domain() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         let cases = im::hashmap! {
             "increment".to_string() => Value::Object(im::hashmap! {
@@ -977,7 +1021,7 @@ mod tests {
             .set("__exec__", exec)
             .set("x", Value::Integer(0));
 
-        let result = exec_while_loop(&reg, &state, &while_loop).unwrap();
+        let result = exec_while_loop(&reg, &state, &while_loop, &mut ctx).unwrap();
 
         // Verify: increment → set_context(x+=1) → advance → noop → termination_domain matches → stop
         assert_eq!(result.get("x"), Some(&Value::Integer(1)));
@@ -992,6 +1036,7 @@ mod tests {
     #[test]
     fn test_self_driving_audit_chain_construction() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         let cases = im::hashmap! {
             "increment".to_string() => Value::Object(im::hashmap! {
@@ -1044,7 +1089,7 @@ mod tests {
             .set("__exec__", exec)
             .set("x", Value::Integer(0));
 
-        let result = exec_while_loop(&reg, &state, &while_loop).unwrap();
+        let result = exec_while_loop(&reg, &state, &while_loop, &mut ctx).unwrap();
 
         // Verify: audit chain exists and has records
         let chain_val = result.get("__audit_chain").expect("audit chain must exist");
@@ -1079,6 +1124,7 @@ mod tests {
     #[test]
     fn test_self_driving_audit_disabled() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         let cases = im::hashmap! {
             "increment".to_string() => Value::Object(im::hashmap! {
@@ -1131,7 +1177,7 @@ mod tests {
             .set("__exec__", exec)
             .set("x", Value::Integer(0));
 
-        let result = exec_while_loop(&reg, &state, &while_loop).unwrap();
+        let result = exec_while_loop(&reg, &state, &while_loop, &mut ctx).unwrap();
 
         // Verify: functionality works but no audit chain
         assert_eq!(result.get("x"), Some(&Value::Integer(1)));
@@ -1146,6 +1192,7 @@ mod tests {
     #[test]
     fn test_self_driving_max_steps_safety() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         // case "increment": x += 1, but the queue pushes another increment (simulating infinite loop)
         // Actually dispatch case pushes advance_instruction, advance → noop → stop.
@@ -1201,7 +1248,7 @@ mod tests {
             .set("__exec__", exec)
             .set("x", Value::Integer(0));
 
-        let result = exec_while_loop(&reg, &state, &while_loop).unwrap();
+        let result = exec_while_loop(&reg, &state, &while_loop, &mut ctx).unwrap();
 
         // Verify: max_steps limits execution, but normal flow should terminate within 3 steps
         // increment → set_context → advance → noop → stop (1 iteration is enough)
@@ -1213,6 +1260,7 @@ mod tests {
     #[test]
     fn test_self_driving_evaluate_domain_branch() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         // case "check": evaluate_domain checks x > 0, on_true pushes increment
         let cases = im::hashmap! {
@@ -1258,7 +1306,7 @@ mod tests {
             .set("__exec__", exec)
             .set("x", Value::Integer(5));
 
-        let result = exec_while_loop(&reg, &state, &while_loop).unwrap();
+        let result = exec_while_loop(&reg, &state, &while_loop, &mut ctx).unwrap();
 
         // Verify: check → evaluate_domain(x>0=true) → pushes increment to queue
         // → drain: increment is a business instruction → set as current → next loop dispatch
@@ -1272,6 +1320,7 @@ mod tests {
     #[test]
     fn test_self_driving_push_instruction_sequence() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         // case "batch": push two increments to the queue
         let cases = im::hashmap! {
@@ -1313,7 +1362,7 @@ mod tests {
             .set("__exec__", exec)
             .set("x", Value::Integer(0));
 
-        let result = exec_while_loop(&reg, &state, &while_loop).unwrap();
+        let result = exec_while_loop(&reg, &state, &while_loop, &mut ctx).unwrap();
 
         // Verify: batch → push_instruction_sequence(2 increments) → advance
         // → drain: increment(business) → next loop dispatch → x+=1 → advance
@@ -1327,6 +1376,7 @@ mod tests {
     #[test]
     fn test_condition_ref_object_resolved() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         // condition = {"$ref": "flag"}, flag in state is Bool(false)
         let mut params = HashMap::new();
@@ -1345,7 +1395,7 @@ mod tests {
             .set("__exec__", exec)
             .set("flag", Value::Bool(false));
 
-        let result = exec_while_loop(&reg, &state, &instr).unwrap();
+        let result = exec_while_loop(&reg, &state, &instr, &mut ctx).unwrap();
         // Condition is false, 0 iterations, __running remains true (loop didn't start)
         assert!(is_running(&result));
     }
@@ -1353,6 +1403,7 @@ mod tests {
     #[test]
     fn test_condition_ref_object_true() {
         let reg = make_registry();
+        let mut ctx = ExecCtlCtx::new();
 
         let mut params = HashMap::new();
         params.insert(
@@ -1376,7 +1427,7 @@ mod tests {
             .set("__exec__", exec)
             .set("flag", Value::Bool(true));
 
-        let result = exec_while_loop(&reg, &state, &instr).unwrap();
+        let result = exec_while_loop(&reg, &state, &instr, &mut ctx).unwrap();
         // Condition is true, enters loop body. Body is noop, drain_queue detects
         // queue empty + current instruction is noop, triggers advance_instruction,
         // which hits termination_domain and sets __running=false → normal exit.

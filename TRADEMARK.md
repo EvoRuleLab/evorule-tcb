@@ -2,9 +2,8 @@
 
 **Effective date**: 2026-07-02
 **Initial holder**: DAMU ZHENG <evorulelab@gmail.com>
-**Pending assignment**: 长沙元则文化传播有限公司
-                 (Changsha Yuanze Culture Communication Co., Ltd.)
-                 — see COPYRIGHT_ASSIGNMENT_POLICY.md
+**Pending assignment**: Changsha Yuanze Culture Communication
+                 Co., Ltd. (Yuanze) — see COPYRIGHT_ASSIGNMENT_POLICY.md
 
 This document describes the permitted and prohibited uses of
 the trademarks associated with the evorule-tcb project.
@@ -14,7 +13,7 @@ the trademarks associated with the evorule-tcb project.
 The trademarks associated with evorule-tcb are two registered
 marks (the "Marks"). The textual components of the Marks are:
 
-- 元则 (Chinese)
+- Yuanze (Chinese transliteration)
 - EvoRule (English)
 
 The Marks are registered with the relevant trademark office.
@@ -53,7 +52,8 @@ provided that all of the following conditions are met:
 
 You may NOT do any of the following without prior written
 permission from the trademark holder (currently DAMU ZHENG,
-pending assignment to 长沙元则文化传播有限公司; see
+pending assignment to Changsha Yuanze Culture Communication Co.,
+Ltd. (Yuanze); see
 COPYRIGHT_ASSIGNMENT_POLICY.md):
 
 - **Use in product or service names**. You may not use the

@@ -64,7 +64,7 @@
 //! - Object: `0x06` + 8-byte length prefix (big-endian) + sorted keys (length-prefixed) + values
 //! - Bytes: `0x08` + 8-byte length prefix (big-endian) + raw bytes
 
-use crate::value::Value;
+use crate::value::{ImMapExt, Value};
 use sha2::{Digest, Sha256};
 
 /// Content hash — `EvoRule`'s deterministic hash function.
@@ -80,13 +80,28 @@ pub fn content_hash(values: &[Value]) -> String {
     hex::encode(hasher.finalize())
 }
 
+const MAX_HASH_DEPTH: usize = 128;
+
 /// Convert a Value to bytes (for hashing).
 ///
 /// Each variant has a unique type tag prefix to prevent collisions between
 /// different types. Variable-length types (String, Bytes, Object keys) also
 /// include a length prefix (big-endian u64) to prevent boundary ambiguity
 /// when concatenated in List/Object.
+///
+/// # Depth Limit
+///
+/// Recursive processing of List and Object values is limited to `MAX_HASH_DEPTH`
+/// to prevent infinite recursion from deeply nested or cyclic data structures.
+/// Exceeding the depth limit returns a placeholder (0x07) instead of the actual bytes.
 fn value_to_bytes(val: &Value) -> Vec<u8> {
+    value_to_bytes_inner(val, 0)
+}
+
+fn value_to_bytes_inner(val: &Value, depth: usize) -> Vec<u8> {
+    if depth > MAX_HASH_DEPTH {
+        return vec![0x07];
+    }
     match val {
         Value::Null => vec![0x00],
         Value::Bool(b) => vec![0x01, u8::from(*b)],
@@ -96,7 +111,6 @@ fn value_to_bytes(val: &Value) -> Vec<u8> {
             bytes
         }
         Value::Float(f) => {
-            // Defensive assertion: NaN should have been normalized by Value::float()
             debug_assert!(
                 !f.0.is_nan(),
                 "Float NaN should have been normalized by Value::float()"
@@ -115,21 +129,17 @@ fn value_to_bytes(val: &Value) -> Vec<u8> {
             let mut bytes = vec![0x05];
             bytes.extend_from_slice(&(v.len() as u64).to_be_bytes());
             for item in v {
-                bytes.extend_from_slice(&value_to_bytes(item));
+                bytes.extend_from_slice(&value_to_bytes_inner(item, depth + 1));
             }
             bytes
         }
         Value::Object(m) => {
             let mut bytes = vec![0x06];
             bytes.extend_from_slice(&(m.len() as u64).to_be_bytes());
-            // Sort entries by key to ensure determinism (im::HashMap iter is unordered).
-            let mut entries: Vec<(&String, &Value)> = m.iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
-            for (key, value) in entries {
-                // Length-prefix the key to prevent 0x00-in-key collisions
+            for (key, value) in m.iter_sorted() {
                 bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
                 bytes.extend_from_slice(key.as_bytes());
-                bytes.extend_from_slice(&value_to_bytes(value));
+                bytes.extend_from_slice(&value_to_bytes_inner(value, depth + 1));
             }
             bytes
         }
@@ -682,6 +692,69 @@ mod tests {
                 let h1 = content_hash(&[single.clone()]);
                 let h2 = content_hash(&[double]);
                 prop_assert_ne!(h1, h2, "bytes collision at split position {}", i);
+            }
+        });
+    }
+
+    /// Property 9: State data iteration order is deterministic (P6 compliance).
+    /// Verify that iterating over state.data() produces consistent order across multiple runs.
+    #[test]
+    fn prop_state_data_iter_order_deterministic() {
+        proptest!(|(size in 0..20)| {
+            use crate::state::State;
+            let mut map = im::HashMap::new();
+            for i in 0..size {
+                map.insert(format!("key_{}", i), Value::Integer(i as i64));
+            }
+            let state = State::from_im_map(map);
+
+            let results: Vec<Vec<String>> = (0..100).map(|_| {
+                state.data().iter_sorted().map(|(k, _)| k.clone()).collect()
+            }).collect();
+
+            for i in 1..100 {
+                prop_assert_eq!(&results[0], &results[i], "State iteration order changed at run {}", i);
+            }
+        });
+    }
+
+    /// Property 10: Value::Object Display format is deterministic (P6 compliance).
+    /// Verify that Display for Object values produces consistent output across multiple runs.
+    #[test]
+    fn prop_value_object_display_deterministic() {
+        proptest!(|(size in 0..20)| {
+            let mut map = im::HashMap::new();
+            for i in 0..size {
+                map.insert(format!("key_{}", i), Value::Integer(i as i64));
+            }
+            let value = Value::Object(map);
+
+            let results: Vec<String> = (0..100).map(|_| format!("{}", value)).collect();
+
+            for i in 1..100 {
+                prop_assert_eq!(&results[0], &results[i], "Object display format changed at run {}", i);
+            }
+        });
+    }
+
+    /// Property 11: iter_std_hashmap_sorted produces deterministic order (P6 compliance).
+    #[test]
+    fn prop_std_hashmap_iter_sorted_deterministic() {
+        proptest!(|(size in 0..20)| {
+            let mut map = std::collections::HashMap::new();
+            for i in 0..size {
+                map.insert(format!("key_{}", i), Value::Integer(i as i64));
+            }
+
+            let results: Vec<Vec<(String, Value)>> = (0..100).map(|_| {
+                crate::value::iter_std_hashmap_sorted(&map)
+                    .into_iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            }).collect();
+
+            for i in 1..100 {
+                prop_assert_eq!(&results[0], &results[i], "StdHashMap sorted iteration order changed at run {}", i);
             }
         });
     }
