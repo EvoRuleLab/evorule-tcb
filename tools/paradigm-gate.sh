@@ -41,7 +41,11 @@ section() { echo; echo -e "${BOLD}=== $1 ===${RESET}"; }
 
 # ---------- File lists ----------
 get_rs_files() {
-    git ls-files 2>/dev/null | grep -E '\.rs$' || true
+    # Exclude `benches/` directories: they hold developer-facing benchmark
+    # harnesses (cargo bench), which are dev-only and never compiled into
+    # the release artifact. Wall-clock timing is permitted there by design.
+    # All other .rs files (src/, tests/, examples/) remain in scope.
+    git ls-files 2>/dev/null | grep -E '\.rs$' | grep -vE '/benches/' || true
 }
 get_json_files() {
     git ls-files 2>/dev/null | grep -E '\.json$' || true

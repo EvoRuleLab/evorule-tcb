@@ -38,6 +38,16 @@ regex = { workspace = true } # Domain::Matches (domain.rs)
 # Future when_loop property tests will go here.
 proptest = { workspace = true }
 
+# Hand-rolled benchmark harness at `crates/tcb/benches/primitives.rs`.
+# `harness = false` is REQUIRED so cargo bench invokes our custom `main()`
+# instead of cargo's default libtest harness (which only knows about
+# `#[bench]` / `#[test]` attributes). The file uses std::time::Instant
+# for wall-clock timing; this is permitted inside `benches/` (paradigm-gate
+# G-02 exempts that path). See the bench file header for the full rationale.
+[[bench]]
+name = "primitives"
+harness = false
+
 [features]
 default = []
 tracing = ["dep:log"]
