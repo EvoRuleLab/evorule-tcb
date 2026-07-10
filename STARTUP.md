@@ -42,9 +42,9 @@
 - Runtime primitive switching requires creating new frozen registry versions to maintain execution determinism
 - In-flight executions continue using old registry versions while new requests use updated versions
 - TCB and governance-core must use Cargo.lock files and build with --locked flag in CI to ensure dependency version consistency
-- Rust toolchain must be locked to version 1.75.0 via rust-toolchain.toml
+- Rust toolchain must be locked to version 1.92 via rust-toolchain.toml
 - proptest version must be unified to 1.5.0 across TCB and governance-core
-- tempfile dependency must be pinned to version 3.9.0 to avoid getrandom v0.4.3 incompatibility with Rust 1.75.0
+- tempfile dependency can use latest version (getrandom v0.4.3 compatibility issue resolved with Rust 1.92)
 - Registry must be frozen during evaluate() execution, with verification tests ensuring no runtime modifications
 - Critical paths must use im::HashMap or explicit sorting for std::collections::HashMap to maintain deterministic iteration order
 - No platform-dependent integer casts — direct i64/u64 to usize conversion is prohibited; must use (n as u64).min(usize::MAX as u64) as usize pattern
@@ -79,6 +79,6 @@
 - State::set() only supports top-level keys; use State::set_path() for nested paths (e.g., **inference**.has_cycle)
 - State::get() only supports top-level keys; use State::get_path() for nested paths (e.g., **planning**.rules_ref)
 - koa-connect wrapper caused ctx leaks; native Koa middleware implementation required instead
-- getrandom v0.4.3 is incompatible with Rust 1.75.0 due to edition2024 requirement; tempfile must be downgraded to 3.9.0 to avoid this dependency
+- getrandom 0.4.3 requires edition2024 (Rust 1.85+); the tempfile 3.9.0 pin was a workaround pre-1.92
 - std::collections::HashMap iteration order is non-deterministic; critical paths must use sorted iteration or im::HashMap
 - Full state comparison using != is O(n) and inefficient; use version field comparison for O(1) state change detection

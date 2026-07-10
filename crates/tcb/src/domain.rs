@@ -27,31 +27,21 @@
 //! # Determinism Guarantee
 //!
 //! `Domain` evaluation is **fully deterministic** at L1:
-//! - All operators (`Eq`, `Gt`, `Contains`, `Matches`, etc.) are pure functions.
+//! - All operators (`Eq`, `Gt`, `Contains`, etc.) are pure functions.
 //! - `And`/`Or`/`Not` follow standard Boolean logic.
 //! - `Universal` always returns `true`; `Empty` always returns `false`.
+//! - `Contains` / `NotContains` only work with list elements (not strings).
 //!
 //! # Determinism Boundary (L2-L4)
 //!
 //! | Aspect | Status | Condition |
 //! |--------|--------|-----------|
-//! | `Matches` (regex) | ⚠️ L2 conditional | Lock `regex` crate version |
-//! | `Matches` compilation failure | ⚠️ Semantic | Returns `false` silently (see below) |
 //! | Float comparisons (`OrderedFloat`) | ✅ L1 deterministic | NaN normalized to 0.0 |
-//!
-//! # Regex Matching Semantic Note
-//!
-//! When `Matches` or `NotMatches` is used with an invalid regex pattern,
-//! `value_matches` **returns `false` silently** rather than returning an error.
-//!
-//! This is **deterministic** (same invalid pattern → same `false` result),
-//! but callers cannot distinguish "no match" from "regex compilation failed".
-//! Consider pre-validating regex patterns in your application layer.
 //!
 //! # Cross-Platform Note
 //!
-//! - `regex` crate semantics may vary across versions. Lock to a specific version.
 //! - `OrderedFloat` behavior is consistent across all Rust platforms.
+//! - Regex matching (`Matches`/`NotMatches`) has been moved to Governance layer.
 
 use crate::state::State;
 use crate::value::Value;

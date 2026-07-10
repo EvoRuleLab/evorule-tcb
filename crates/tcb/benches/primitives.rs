@@ -70,7 +70,7 @@ impl Stats {
             samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
         let stddev = variance.sqrt();
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = if n % 2 == 0 {
+        let median = if n.is_multiple_of(2) {
             (samples[n as usize / 2 - 1] + samples[n as usize / 2]) / 2.0
         } else {
             samples[n as usize / 2]

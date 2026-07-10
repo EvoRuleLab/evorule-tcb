@@ -511,7 +511,7 @@ impl AuditChainState {
 
 /// Compute the SHA256 hash of a State.
 pub fn compute_state_hash(state: &Value) -> String {
-    content_hash(&[state.clone()])
+    content_hash(std::slice::from_ref(state))
 }
 
 // ══════════════════════════════════════════════

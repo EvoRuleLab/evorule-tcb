@@ -240,13 +240,14 @@ jobs:
         run: cargo audit
 
   # ============================================================
-  # G-23: Publish dry-run (on main branch only)
+  # G-23: Publish Pipeline (on release tag only)
   # ============================================================
 
   publish-dry-run:
-    name: Publish dry-run
+    name: F1 Publish Dry-run
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, tcb-gates, paradigm-gates, audit]
     steps:
       - uses: actions/checkout@v4
 
@@ -262,12 +263,108 @@ jobs:
       # G-23: Publish dry-run
       - name: G-23 cargo publish --dry-run
         run: |
-          # Check all workspace crates
           for crate in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].manifest_path' | xargs dirname | grep -v '/tests/' | sort -u); do
-            echo "Checking $crate..."
-            (cd "$crate" && cargo publish --dry-run --allow-dirty) || exit 1
+            echo "::group::Checking $crate..."
+            (cd "$crate" && cargo publish --dry-run --locked) || exit 1
+            echo "::endgroup::"
+          done
+
+  publish:
+    name: F2 Publish to crates.io
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [publish-dry-run]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.92
+
+      - name: Publish to crates.io
+        run: |
+          for crate in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].manifest_path' | xargs dirname | grep -v '/tests/' | sort -u); do
+            echo "::group::Publishing $crate..."
+            (cd "$crate" && cargo publish --locked) || exit 1
+            echo "::endgroup::"
           done
         env:
-          # --allow-dirty required because we're in a dirty git state (CI)
-          # --dry-run doesn't actually publish, so it's safe
-          CARGO_REGISTRY_TOKEN: dummy
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  post-release-validation:
+    name: F3 Post-release Validation
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [publish]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.92
+
+      - name: Create test project and verify
+        run: |
+          VERSION=$(echo "${{ github.ref }}" | sed 's/refs\/tags\/v//')
+          mkdir -p /tmp/test-release && cd /tmp/test-release
+
+          cat > Cargo.toml << EOF
+          [package]
+          name = "evorule-tcb-release-test"
+          version = "0.1.0"
+          edition = "2021"
+
+          [dependencies]
+          evorule-tcb = "$VERSION"
+          EOF
+
+          cat > src/main.rs << EOF
+          use evorule_tcb::{State, Value};
+
+          fn main() {
+              let state = State::empty().set("test", Value::String("release_test".to_string()));
+              assert_eq!(state.get("test").unwrap().as_string().unwrap(), "release_test");
+              println!("TCB release v{} validation passed!", env!("CARGO_PKG_VERSION"));
+          }
+          EOF
+
+          echo "::group::Building test project..."
+          cargo build --locked
+          echo "::endgroup::"
+
+          echo "::group::Running test..."
+          cargo run --locked
+          echo "::endgroup::"
+
+          if [ $? -ne 0 ]; then
+            echo "❌ Post-release validation failed"
+            exit 1
+          fi
+          echo "✅ Post-release validation passed"
+
+  auto-yank-on-failure:
+    name: F4 Auto-Yank on Failure
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && failure()
+    needs: [post-release-validation]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.92
+
+      - name: Yank failed release
+        run: |
+          VERSION=$(echo "${{ github.ref }}" | sed 's/refs\/tags\/v//')
+          echo "⚠️ Post-release validation failed. Yanking version $VERSION..."
+
+          for crate in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].manifest_path' | xargs dirname | grep -v '/tests/' | sort -u); do
+            CRATE_NAME=$(grep '^name =' "$crate/Cargo.toml" | sed 's/name = "\(.*\)"/\1/')
+            echo "::group::Yanking $CRATE_NAME v$VERSION..."
+            cargo yank "$CRATE_NAME" --vers "$VERSION"
+            echo "::endgroup::"
+          done
+
+          echo "⚠️ Release v$VERSION has been yanked due to validation failure."
+          echo "⚠️ Users will see warnings when trying to use this version."
+          echo "⚠️ Manual investigation required before re-publishing."
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

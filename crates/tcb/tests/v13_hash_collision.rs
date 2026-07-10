@@ -126,7 +126,7 @@ proptest! {
         let v3 = Value::Bool(b);
         let v = Value::list(vec![v1, v2, v3]);
 
-        let h1 = content_hash(&[v.clone()]);
+        let h1 = content_hash(std::slice::from_ref(&v));
         let h2 = content_hash(&[v]);
         prop_assert_eq!(h1, h2, "content_hash must be deterministic");
     }

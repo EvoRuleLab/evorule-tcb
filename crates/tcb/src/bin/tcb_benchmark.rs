@@ -291,13 +291,13 @@ fn bench_content_hash() -> Vec<BenchResult> {
     let medium_value = Value::list((0..100).map(|i| Value::Integer(i as i64)).collect());
 
     let result1 = run_bench("TCB ContentHash small_string", || {
-        let _ = content_hash(&[small_value.clone()]);
+        let _ = content_hash(std::slice::from_ref(&small_value));
     });
     result1.print();
     results.push(result1);
 
     let result2 = run_bench("TCB ContentHash medium_list_100", || {
-        let _ = content_hash(&[medium_value.clone()]);
+        let _ = content_hash(std::slice::from_ref(&medium_value));
     });
     result2.print();
     results.push(result2);

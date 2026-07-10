@@ -31,7 +31,6 @@ ordered-float = { workspace = true, features = [
 ] } # OrderedFloat wrapper (value.rs)
 ryu = { workspace = true } # float formatting (value.rs)
 hex = { workspace = true } # hex encoding (audit.rs)
-regex = { workspace = true } # Domain::Matches (domain.rs)
 
 [dev-dependencies]
 # proptest: property-based testing, used in v4-EN TCB tests.

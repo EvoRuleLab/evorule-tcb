@@ -56,7 +56,7 @@ fn test_content_hash_object_deterministic() {
 
     let obj = Value::Object(map);
 
-    let results: Vec<String> = (0..100).map(|_| content_hash(&[obj.clone()])).collect();
+    let results: Vec<String> = (0..100).map(|_| content_hash(std::slice::from_ref(&obj))).collect();
 
     for i in 1..100 {
         assert_eq!(results[0], results[i], "hash {} differs", i);

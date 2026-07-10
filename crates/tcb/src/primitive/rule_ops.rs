@@ -1187,7 +1187,7 @@ pub(crate) fn exec_inject_rule(
             .filter(|r| {
                 r.get("rule_id")
                     .and_then(|v| v.as_str())
-                    .map_or(true, |id| id != rule_id)
+                    .is_none_or(|id| id != rule_id)
             })
             .collect();
     }
